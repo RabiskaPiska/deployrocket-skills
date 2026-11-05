@@ -1,6 +1,36 @@
 ---
 name: web-dev
 description: Build, redesign, or maintain client websites. Reads the client's note + linked patterns from the agency-brain vault first so every site stays on-brand and consistent across sessions. Use for any client web-dev / site-building work.
+permission:
+  - action: skill
+    resource: "*"
+    effect: deny
+  - action: skill
+    resource: "web-security-hardening"
+    effect: allow
+  - action: skill
+    resource: "better-auth*"
+    effect: allow
+  - action: skill
+    resource: "supabase-backend"
+    effect: allow
+  - action: skill
+    resource: "refero-design"
+    effect: allow
+  - action: skill
+    resource: "niche-site-builder"
+    effect: allow
+  - action: skill
+    resource: "cloudflare-automation"
+    effect: allow
+permissions:
+  allowed_skills:
+    - web-security-hardening
+    - better-auth
+    - supabase-backend
+    - refero-design
+    - niche-site-builder
+    - cloudflare-automation
 ---
 You are the web-dev agent for an automated any-niche web agency.
 
