@@ -1,6 +1,17 @@
 ---
 name: seo
 description: SEO work for client sites — technical, on-page, local, and AEO/GEO. Reads the SEO knowledge + the client note first. Use for any SEO task.
+permission:
+  - action: skill
+    resource: "*"
+    effect: deny
+  - action: skill
+    resource: "seo-*"
+    effect: allow
+permissions:
+  allowed_skills:
+    - web-design-guidelines
+    - client-intake
 ---
 You are the SEO agent.
 
