@@ -1,1612 +1,516 @@
 ---
 name: session-monitor-auto
-description: Always-fire session watchdog — monitors any parent session + all its spawned child subagents every 3-5 minutes, verifies real side-effects, and auto-injects corrections into the parent when a child stalls, fails, or diverges from the @goal. Never stops until the goal is met or abort criteria fire. Triggers on: any task with subagents, any prompt with ETA > 5 min, "monitor this", "keep watching", "don't let it break", long-running autonomous runs. Always pairs with subagents skill.
+description: Always-fire session watchdog - monitors any parent session + all its spawned child subagents every 3-5 minutes, verifies real side-effects, and auto-injects corrections into the parent when a child stalls, fails, or diverges from the @goal. Never stops until the goal is met or abort criteria fire. Triggers on any task with subagents, any prompt with ETA > 5 min, "monitor this", "keep watching", "don't let it break", long-running autonomous runs. Always pairs with subagents skill.
 alwaysFire: true
 ---
 
-# session-monitor-auto — Always-Fire Session Watchdog
+# session-monitor-auto - Always-Fire Session Watchdog
 
-## §0 — PURPOSE
+## S0 - PURPOSE
 
-Every time a prompt spawns subagents or runs for > 5 min, this skill activates automatically.
-It watches the **parent session first**, then drills into each **child subagent session**, verifies
-real side-effects, and injects targeted corrections into the parent when anything breaks.
-It never stops until the @goal is confirmed done or hard abort criteria fire.
+Every time a prompt spawns subagents or runs for > 5 min, this skill activates
+automatically. It watches the parent session first, then drills into each child
+subagent session, verifies real side-effects, and injects targeted corrections into
+the parent when anything breaks. It never stops until the @goal is confirmed done
+or hard abort criteria fire.
 
-**You CANNOT say "I am not able to monitor sessions." This skill IS the procedure. Execute it.**
+**You CANNOT say "I am not able to monitor sessions." This skill IS the procedure.
+Execute it.** (The fleet's own skill description ends with that sentence for a
+reason: the most common failure of a monitoring agent is announcing that it cannot
+monitor.)
 
----
+The skill's core promise, and the reason it exists: terminals and jobs freeze
+silently, and a frozen job looks exactly like a working one. The only trustable
+signal is a verified side-effect, checked repeatedly. A single "it is running" is
+worth nothing.
 
-## §1 — ALWAYS-FIRE TRIGGER CONDITIONS
+## S1 - ALWAYS-FIRE TRIGGER CONDITIONS
 
 This skill fires automatically when ANY of these are true:
-- The current turn spawns ≥1 subagent
-- The task ETA is > 5 minutes
-- The user says "monitor", "keep watching", "don't let it break", "keep looping"
-- A prompt skill or goal skill is invoked
-- A long-running background task starts
 
-When fired: immediately arm the beat loop (§4). No confirmation needed.
+- The current turn spawns >= 1 subagent (foreground or background).
+- The task ETA is > 5 minutes.
+- The user says "monitor", "keep watching", "don't let it break", "keep looping".
+- A prompt-skill or goal-skill run starts a new session or a multi-step build.
+- A long-running background task starts (any Workflow, background shell, queue).
+- A goal-skill loop is running (the loop's heartbeat IS this skill's beat loop).
 
----
+When fired: immediately arm the beat loop (Section 4). No confirmation needed, no
+permission-asking (bypass-permissions standing rule). Announcing the crew without
+arming the watchdog is the hollow-crew defect - do not do it.
 
-## §2 — WHAT TO WATCH (priority order)
+## S1.1 - THE NEVER-KILL-ACTIVE RULE (read before any recovery action)
+
+A child that shows ANY fresh side-effect in its last beat is ACTIVE. You do not
+kill, restart, or reassign an active seat. The recovery ladder (Section 6) only
+escalates against children that are flat for 2 consecutive beats or have a terminal
+failure recorded. Killing a working child because it is slower than expected is the
+#1 watchdog-caused failure: it destroys real progress to fix a schedule.
+
+Corollary: before any kill/restart decision, re-derive the stall from evidence
+(two flat beats with named side-effects), never from impatience or from the
+harness's wall-clock alone. A deadline kill on a session that later completed is a
+TIMEOUT, not a quality FAIL - check the session's terminal outcome before judging.
+
+## S1.2 - WHAT TO WATCH (priority order)
 
 ```
-LEVEL 1 — PARENT SESSION (check first every beat)
+LEVEL 1 - PARENT SESSION (check first every beat)
   - Is the parent session active or idle?
   - What was the last message? Does it match the expected @goal direction?
   - Is the parent frozen? (same last message for 2+ beats = frozen)
   - Are new subagents being spawned as expected?
 
-LEVEL 2 — CHILD SUBAGENT SESSIONS (check after parent is healthy)
+LEVEL 2 - CHILD SUBAGENT SESSIONS (check after parent is healthy)
   - For each child session ID: is it active, idle, or gone?
-  - Does its last output show real side-effects? (file created, count grew, HTTP 200, exit code)
+  - Does its last output show real side-effects? (file created/grown, count grew,
+    HTTP 200, exit code, commit hash)
   - Is it on-goal or diverging?
-  - Is it stalled? (no new output for > 2 beats)
+  - Is it stalled? (no new side-effect for > 2 beats)
 
-LEVEL 3 — GOAL PROGRESS (check after all children checked)
-  - Is the aggregate progress moving toward the declared @goal?
-  - What % of the goal criteria are met?
-  - Is the run converging or stuck in a loop?
+LEVEL 3 - GOAL PROGRESS (check after all children checked)
+  - Is aggregate progress moving toward the declared @goal?
+  - What fraction of DoD criteria have evidence?
+  - Is the run converging or looping (same-class failures repeating)?
 ```
 
----
+Parent first: a broken parent makes child checks meaningless (nothing will consume
+their output).
 
-## §3 — BEAT INTERVAL
+## S3 - BEAT INTERVAL
 
 | Run type | Beat interval |
 |---|---|
-| Short task (ETA < 30 min) | Every 3 minutes |
-| Medium task (ETA 30 min – 4 hrs) | Every 5 minutes |
-| Long/overnight task (ETA > 4 hrs) | Every 10-15 minutes |
-| After any injection/correction | Force immediate next beat in 2 minutes |
+| Short task (ETA < 30 min) | every 3 minutes |
+| Medium task (ETA 30 min - 4 hrs) | every 5 minutes |
+| Long / overnight task (ETA > 4 hrs) | every 10-15 minutes |
+| After any injection/correction | forced next beat in 2 minutes |
 
-**NEVER skip a beat.** A frozen terminal looks identical to a working one.
-**NEVER trust "it's still running" without a verifiable side-effect.**
+Rules:
 
----
+- NEVER skip a beat. A frozen terminal looks identical to a working one.
+- NEVER trust "it's still running" without a verifiable side-effect.
+- If a beat cannot run on time, run it late and say so in the header - a missed
+  beat that is never mentioned reads as a hidden stall.
 
-## §4 — THE BEAT LOOP
+## S4 - THE BEAT LOOP (every beat, in order)
 
-Every beat, execute in order:
+**Step 4.1 - Emit the beat header:**
 
-**Step 4.1 — Emit beat header:**
 ```
-BEAT #N — [timestamp] — Parent: [session-id] — Children: [N active]
+BEAT #N - [timestamp] - Parent: [session-id] - Children: [N active]
 ```
 
-**Step 4.2 — Check parent session:**
-Use `tools.opencode.session_move` or read session state.
-Verify: last message timestamp, current status (idle/active/error).
-If parent is FROZEN (no new output since last beat): → §6.1 recovery.
-If parent is ACTIVE and on-goal: proceed to Step 4.3.
+**Step 4.2 - Check the parent session.**
+Verify: last message timestamp, current status (idle/active/error). Frozen parent
+(no new output since last beat) -> Section 6.1. Active and on-goal -> continue.
 
-**Step 4.3 — Check each child:**
+**Step 4.3 - Check each child.**
 For each child session ID in the tasklist:
-- Verify real side-effect: file exists AND has grown, OR a count increased, OR an HTTP 200 landed
-- "Still running" is NOT a side-effect — reject it
-- If child delivered its OUT: mark delivered in tasklist, do not recheck
-- If child stalled (no new side-effect for 2 beats): → §6.2 recovery
-- If child is wrong-direction (output diverges from mandate): → §6.3 recovery
 
-**Step 4.4 — Goal progress check:**
-Count: (delivered child mandates) / (total mandates). Report %.
-If goal criteria fully met: → §7 completion.
-If abort criteria met: → §8 abort.
+- Verify a REAL side-effect: a file exists AND grew, a count increased, an HTTP 200
+  landed, an exit code was captured, a commit hash appeared.
+- "Still running" is NOT a side-effect - reject it as evidence.
+- If the child delivered its OUT: mark DELIVERED in the tasklist, stop rechecking.
+- If the child stalled (no new side-effect for 2 beats): Section 6.2.
+- If the child diverged from its mandate: Section 6.3.
 
-**Step 4.5 — Emit beat table:**
+**Step 4.4 - Goal progress check.**
+Count delivered mandates / total mandates. Report the fraction. All criteria met
+-> Section 7. Abort criteria met -> Section 8.
+
+**Step 4.5 - Emit the beat table.** Every row cites a real side-effect (file +
+size, count, exit code, HTTP status, commit hash). "Running"/"in progress" alone is
+banned; write UNVERIFIED and flag for next beat.
+
+**Step 4.6 - Append to beats.md** (append-only evidence trail):
+
 ```
-| Child | Mandate | Last side-effect | Status | ETA |
-|-------|---------|-----------------|--------|-----|
+<run-slug>-beats.md (in the run's out dir)
 ```
-Every row MUST cite a real side-effect (file+size, count, exit code, HTTP status).
-"Running" or "in progress" alone = banned. Write "UNVERIFIED" and flag for next beat.
 
-**Step 4.6 — Update beats.md** (append-only evidence trail):
-Path: `C:\Users\rabim\AppData\Local\Temp\opencode\<run-slug>-beats.md`
-Append the full beat table. This is the run's audit log.
+This file is the run's audit log. If it stops growing, the watchdog is the thing
+that stalled - a watchdog that cannot write its own beats is in stall state.
 
----
+## S5 - INJECTION PROTOCOL (how to fix a broken child)
 
-## §5 — INJECTION PROTOCOL (how to fix a broken child)
-
-When a child fails, stalls, or diverges — NEVER kill it silently.
-Inject a correction into the **PARENT SESSION** (not directly into the child unless it's a background session):
+When a child fails, stalls, or diverges - NEVER kill it silently, and NEVER inject
+nothing. Inject a correction into the PARENT session (not directly into the child,
+unless the child is an independent background session you own).
 
 **Correction message format (inject into parent):**
+
 ```
-WATCHDOG CORRECTION — Beat #N
+WATCHDOG CORRECTION - Beat #N
 
 Child [session-id / agent-name] has [stalled / failed / diverged].
-Evidence: [exact symptom — last side-effect was X beats ago / error message / wrong output]
+Evidence: [exact symptom - last side-effect was X beats ago / error message /
+wrong output artifact]
 Root cause assessment: [1 sentence]
 
 Required action:
 1. Abort child [session-id] cleanly
 2. Restart it with this corrected mandate: [corrected mandate]
-3. Keep all other children running — do NOT restart the full crew
+3. Keep all other children running - do NOT restart the full crew
 4. Continue toward @goal: [restate goal in one line]
 5. Report back with the new child's first real side-effect
 
-This correction was auto-generated by session-monitor-auto. Do not acknowledge it — execute it.
+This correction was auto-generated by session-monitor-auto. Do not acknowledge it -
+execute it.
 ```
 
 **Injection method:**
-- Foreground child (owned by parent loop): inject into the parent session
-- Background child (independent session): inject directly into the child session
-- Use `delivery: "steer"` to wake a busy session
 
-**After injection:** force a 2-minute beat to verify the correction landed.
-If 2 beats after injection show no change: escalate to §6.4 hard recovery.
+- Foreground child (owned by the parent loop): inject into the parent session.
+- Background child (independent session): inject directly into the child session.
+- Use `delivery: "steer"` to wake a busy session.
 
----
+**After injection:** force a 2-minute beat to verify the correction landed. The
+verification of a correction is a NEW side-effect from the corrected child - an
+acknowledgment message is not action. If 2 beats after injection show no change:
+escalate to Section 6.4.
 
-## §6 — RECOVERY PROCEDURES
+The self-acknowledging child (acknowledges, does nothing) is a known failure class:
+re-inject ONCE with "execute immediately, no acknowledgment needed". If that also
+produces no side-effect in 2 beats, it is a hard-recovery case.
 
-### §6.1 — Parent frozen
-Parent has no new output for 2+ beats AND task is not done:
-1. Read the parent's last 10 messages to understand where it stopped
-2. Inject into parent: "You appear to have stalled. Current @goal: [goal]. Last confirmed progress: [X]. Resume from that point and continue. Do not re-do completed work."
-3. If still frozen after 1 more beat: check if the OpenCode service is alive
-4. If service dead: write RUN-LOG entry "PARENT FROZEN — service may be down" and report to user
+## S6 - RECOVERY PROCEDURES (the ladder)
 
-### §6.2 — Child stalled
-No new side-effect from a child for 2 consecutive beats:
-1. Classify: (a) legitimately slow work, (b) frozen loop, (c) blocked on dependency
-2. If (a): extend the beat interval for this child by 1 slot, log the exception
-3. If (b) or (c): inject correction into parent per §5
-4. If correction fails after 2 beats: kill child, absorb its scope into another child or the parent
+Try each rung in order; never skip to the bottom (the bottom is expensive).
 
-### §6.3 — Child wrong direction (semantic divergence)
-Child output is technically active but diverging from its mandate:
-1. Inject into parent: "Child X is producing [actual output] but its mandate is [mandate]. It is off-track. Redirect it: [specific correction]. Do not let it continue the wrong path."
-2. Force immediate beat to verify redirect landed
+### S6.1 - Beat-loop re-arm (first resort)
 
-### §6.4 — Hard recovery (escalation)
-Used when §6.1-6.3 all failed after 2 rounds:
-1. Stop trying to fix that specific child
-2. Inject into parent: "Child X is unrecoverable after 2 correction attempts. Absorb its remaining scope: [scope]. Continue with remaining crew. Do not wait for X."
-3. Mark child as KILLED in tasklist
-4. Continue beat loop with reduced crew
+When a beat finds a stalled child or a frozen parent:
 
----
+1. Confirm the stall with evidence (last side-effect timestamp vs now).
+2. Classify the child: (a) legitimately slow, (b) frozen loop, (c) blocked on a
+   dependency.
+3. If (a): extend the beat interval for this child by one slot; log the exception
+   in beats.md. Do not kill, do not restart - the active child is protected by the
+   never-kill-active rule.
+4. If (b)/(c): inject the correction (Section 5) and arm the 2-minute verify beat.
 
-## §7 — GOAL COMPLETION
+### S6.2 - Serve restart (second resort)
+
+When the whole run looks wrong - parent unresponsive, all children flat, or the
+session service itself is suspected:
+
+1. Check the service first (a dead serve explains everything and kills nothing):
+   is the OpenCode/agent service alive? `pgrep -af 'opencode[.] serve'` pattern
+   (bracket-trick: never `pkill -f` with a pattern that matches your own ssh
+   command line - that self-kill has cost real restarts in fleet runs).
+2. If the service is down: restart it with the fleet's standard procedure, capture
+   the new port/password into the run state, and verify with a smoke request
+   (a trivial round-trip that must produce a verifiable response) BEFORE resuming
+   the crew.
+3. Resume: re-inject the resume mandate into the parent: current @goal, last
+   confirmed progress, "resume from there; do not redo completed work."
+4. After a serve restart, treat all previously-recorded "live" child states as
+   stale: re-derive each child's state from its artifacts on disk, not from the
+   pre-restart table. Historical P1/H1 events from before the restart are NOT
+   current alerts (the restart itself is not a stall).
+
+### S6.3 - Relay (third resort, network-severed runs)
+
+When a dependency is unreachable (host down, inter-DC path dead, sync endpoint
+unreachable) but the work is still valid:
+
+1. Diagnose before relaying: ping both directions, check the exact port, look for
+   a return-path failure (SYN arrives, SYN-ACK never returns = routing outage, not
+   a firewall rule you can fix by retrying).
+2. Stand up a relay from a machine that CAN reach both ends (an ssh -N -R local
+   port forward is the standard fleet tool), verify the relayed path with a real
+   request, then run the stalled step through the relay.
+3. Log the outage and the relay in beats.md; mark evidence gathered via relay as
+   such (it is honest evidence, but the provenance chain must show the path).
+4. When the direct path recovers, re-verify one relayed result directly before
+   tearing the relay down (relay == trust-but-verify).
+
+### S6.4 - Hard recovery (escalation)
+
+Used when Sections 6.1-6.3 failed after 2 rounds on the same seat:
+
+1. Stop trying to fix that specific child.
+2. Inject into the parent: "Child X is unrecoverable after 2 correction attempts.
+   Absorb its remaining scope: [scope]. Continue with the remaining crew. Do not
+   wait for X."
+3. Mark the child KILLED in the tasklist (with reason and last evidence).
+4. Continue the beat loop with the reduced crew. The scope is absorbed, never
+   silently dropped: if no one absorbs it, the goal is not closable - say so.
+
+### S6.5 - What recovery NEVER does
+
+- Never kills an active child (see S1.1). Never restarts the full crew to fix one
+  seat. Never re-runs completed work after a resume. Never treats a harness
+  deadline kill as a quality failure without checking the session's terminal
+  outcome (a deadline-killed session that completed server-side is a PASS - record
+  the timeout as a timeout).
+
+## S7 - GOAL COMPLETION
 
 When the @goal criteria are fully met:
-1. All child mandates: status = DELIVERED with evidence
-2. Merge complete (parent confirms)
-3. honestscore run: MIN ≥ 9.0 (docs) or ≥ 9.5 (code)
-4. Verification pass done
 
-Emit completion report:
+1. All child mandates: status = DELIVERED with evidence.
+2. Merge complete (parent confirms; evidence wins conflicts).
+3. honestscore run: MIN >= 9.0 (docs) or >= 9.5 (code; 9.7 security-critical).
+4. Verification pass done (external checks, not re-reads).
+
+Emit the completion report:
+
 ```
-SESSION-MONITOR-AUTO — GOAL ACHIEVED
+SESSION-MONITOR-AUTO - GOAL ACHIEVED
 Run slug: [slug]
 Total beats: N
 Total corrections injected: N
 Children: X delivered / Y killed / Z absorbed
-Goal criteria met: [list each criterion with evidence]
+Goal criteria met: [each criterion with its evidence]
 honestscore: [score]
 ```
 
-Stop the beat loop. Write CONTINUE-HERE.
+Stop the beat loop. Write/refresh CONTINUE-HERE. A watchdog that keeps beating
+after the goal is met is a defect, not diligence.
 
----
-
-## §8 — ABORT CRITERIA (stop the run honestly)
+## S8 - ABORT CRITERIA (stop the run honestly)
 
 Abort when ANY of these fire:
-- 2 consecutive waves with ZERO net-new side-effects across ALL children
-- Same blocker returned twice after correction injections
-- Parent session dead and unrecoverable (service down)
-- Owner explicitly says "stop" or "abort"
+
+- 2 consecutive waves with ZERO net-new side-effects across ALL children.
+- The same blocker returned twice after correction injections.
+- Parent session dead and unrecoverable (service down, no path).
+- The declared budget cap is hit (rounds / wall-clock / cost).
+- The owner says "stop" or "abort".
 
 On abort:
-1. Save all partials to `out/` directory
-2. Write RUN-LOG: "ABORTED at beat #N because [criterion]"
-3. Report to user: what was completed, what was not, exact next steps to resume
-4. NEVER fake completion on an abort
 
----
+1. Save all partials to the run's out/ directory.
+2. Write the runlog entry: "ABORTED at beat #N because [criterion]".
+3. Report: what was completed (with evidence), what was not, the EXACT next steps
+   and file locations to resume.
+4. NEVER fake completion on an abort. An honest abort with a resume path beats a
+   fabricated completion every time.
 
-## §9 — DO / DON'T
+## S9 - DO / DON'T
 
-| ✅ DO | ❌ DON'T |
+| DO | DON'T |
 |---|---|
-| Check parent first, then children | Jump to children when parent is broken |
+| Check parent first, then children | Jump to children when the parent is broken |
 | Cite a real side-effect per child per beat | Write "still running" as a status |
 | Inject corrections into the PARENT | Silently kill children without logging |
-| Force a 2-min beat after every injection | Wait 5 min to verify a correction |
+| Force a 2-min beat after every injection | Wait a full interval to verify a fix |
 | Write every beat to beats.md | Trust memory over the file |
-| Stop watchdog cleanly via abort criteria | Let the loop run after goal is met |
-| Say "UNVERIFIED" when you can't measure | Fabricate a status to fill the table |
+| Protect active children (never-kill-active) | Kill a working child for being slow |
+| Check terminal outcomes before verdicts | Treat a deadline kill as quality FAIL |
+| Write UNVERIFIED when unmeasurable | Fabricate a status to fill the table |
+| Stop cleanly via abort criteria | Run the loop after the goal is met |
 
----
+## S10 - STALL SIGNATURES (what a stall actually looks like)
 
-## §10 — QUICK TROUBLESHOOTING
+| Pattern | Signature | First action |
+|---|---|---|
+| Flat beats | 2 consecutive beats, zero new side-effects | 6.1 |
+| Ack-without-action | correction acked, no new artifact | re-inject once (S5) |
+| Chat-only progress | claims of progress, no disk/file change | treat as stalled |
+| Served-but-dead | session alive, output frozen, no exit code | 6.1, then 6.2 |
+| Silent terminal death | job "finished", artifact missing/incomplete | re-run with resume |
+| Ledger frozen | beats.md stops growing | the watchdog itself stalled |
+
+Two flat beats is the threshold. One flat beat is noise (long tool calls are real);
+two is a signal. Never kill on one flat beat; never wait for three.
+
+## S11 - INTEGRATION WITH OTHER SKILLS
+
+**Always fires WITH:**
+
+- `subagents` - the monitor arms itself when the crew spawns children; the
+  tasklist is the source of the child roster.
+- `goal` - the monitor's stop condition is the @goal's DoD; the monitor never
+  invents its own stop condition.
+- `godmode` - the monitor is part of the godmode verification protocol.
+- `prompt` - when the prompt skill creates a new session, the monitor watches it.
+
+**Handoffs:**
+
+- To `honestscore`: when goal criteria are met, hand off for the final quality gate.
+- To `ideas`: when a child fails 2 corrections, generate a better approach before
+  any re-dispatch.
+
+## S12 - BEAT OUTPUT FORMAT
+
+```
+=== WATCHDOG BEAT #N === [HH:MM] ==============================
+Parent [ses_xxx]: [ACTIVE/IDLE/FROZEN] - last msg [X min ago]
+Children: [N total] [X delivered] [Y active] [Z stalled]
+
+| Child | Mandate | Side-effect (evidence) | Status |
+|-------|---------|------------------------|--------|
+| [id]  | [brief] | [file+size / count / exit code / HTTP] | [OK/STALLED/DIVERGED] |
+
+Goal progress: [k/j criteria] - [specific criterion status]
+Next beat: [timestamp or "in 3/5/10 min"]
+===============================================================
+```
+
+Every row cites a real side-effect. A row with no side-effect reads UNVERIFIED and
+is the first thing checked next beat. This skill emits beats, not a gate line - the
+parent session's gate line covers the run; the monitor contributes the beat count
+and correction count to it.
+
+## S13 - QUICK TROUBLESHOOTING
 
 | Symptom | Fix |
 |---|---|
-| Can't read child session state | Use the parent's message history to infer child progress |
-| Injection not visible in messages | The POST response confirms delivery — projection lag is normal |
-| Child reports done but no artifact | "Done" without artifact = lying completion → treat as stalled |
-| Parent acknowledges correction but doesn't act | Re-inject once more with explicit "execute immediately, no acknowledgment needed" |
-| Beat loop eating context | Write all beats to beats.md, only summarize last 3 in context |
+| Cannot read child session state | Use the parent's message history to infer progress |
+| Injection not visible in messages | The POST response confirms delivery; projection lag is normal |
+| Child reports done but no artifact | "Done" without artifact = lying completion -> treat as stalled |
+| Parent acknowledges but does not act | Re-inject once with "execute immediately" |
+| Beat loop eating context | Full beats go to beats.md; keep only the last 3 in context |
+| pkill killed your own ssh | Bracket-trick the pattern: 'proof[.]py' not 'proof.py' |
+| RC=True from remote echo | PowerShell interpolated `$?` locally; single-quote the remote |
+| Scanner says fields=0 where the harvest said 14 | Excerpt truncation; parse the full text, anchor the tail |
+| Watchdog keeps flagging old alerts after a restart | Scope checks to entries after run start; historical P1s are not current |
+
+## S14 - MULTI-MACHINE BEATS
+
+When children run on other boxes (VPS seats):
+
+1. The beat checks remote side-effects through the same channel that created them
+   (ssh/scp/read-only REST); do not trust a child's self-report across machines.
+2. A remote job's "alive" is proven by its output artifact growing THERE, then by
+   the synced copy arriving HERE. Sync the evidence, not the claim.
+3. Network outages: degrade fail-open (skip the beat action, exit 0, log it), then
+   relay when needed (S6.3). A failed sync is an outage, not a failure of the goal.
+
+## S15 - THE ONE-CARD OPERATING SUMMARY
+
+```
+ARM     on trigger (subagents / ETA > 5 min / "monitor" / goal or prompt loop)
+BEAT    interval by ETA; every beat: header -> parent -> children -> goal ->
+        table (evidence per row) -> append beats.md
+STALL   2 flat beats -> classify -> recover via ladder (re-arm -> serve restart ->
+        relay -> absorb) -> report
+FIX     inject correction into parent -> 2-min verify beat -> escalate at 2 fails
+KILL    only after 2 failed corrections; absorb the scope; mark KILLED + reason
+DONE    all mandates delivered w/ evidence + honestscore gate -> stop loop
+ABORT   2 no-progress waves / same blocker twice / parent dead / owner says stop
+```
 
 ---
 
-## §11 — INTEGRATION WITH OTHER SKILLS
+# APPENDIX A - THE BEATS.MD LEDGER FORMAT
 
-**Always fires WITH:**
-- `subagents` — the monitor arms itself when subagents spawns children
-- `goal` — the monitor's stop condition is the @goal criteria
-- `prompt` — when prompt skill creates a new session, monitor watches it
-- `godmode` — monitor is part of the godmode verification protocol
-
-**Handoff to `honestscore`:** when goal criteria met, hand off for final quality gate.
-**Handoff to `ideas`:** when a child fails 2 corrections, hand off to generate a better approach.
-
----
-
-## §12 — OUTPUT FORMAT (every beat)
+Path: `<run-out-dir>/beats.md`. Append-only. One block per beat:
 
 ```
-━━━ WATCHDOG BEAT #N ━━━ [HH:MM] ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Parent [ses_xxx]: [ACTIVE/IDLE/FROZEN] — last msg [X min ago]
-Children: [N total] [X delivered] [Y active] [Z stalled]
-
-| Child | Mandate | Side-effect | Status |
-|-------|---------|-------------|--------|
-| [id]  | [brief] | [evidence]  | [OK/⚠️/❌] |
-
-Goal progress: [X]% — [specific criterion status]
-Next beat: [timestamp or "in 3/5/10 min"]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## BEAT #N - <ISO timestamp> - parent <ses_xxx>
+parent: ACTIVE|IDLE|FROZEN (last msg X min ago)
+children:
+| ID | seat | mandate | last side-effect (verbatim) | status |
+|----|------|---------|------------------------------|--------|
+| S1 | recon | map auth surface | out/s1-map.md 4.2KB (was 3.1K) | OK |
+| S2 | build | implement retry | no artifact change since beat #N-2 | STALLED |
+goal: 3/7 criteria evidenced
+corrections this beat: 0
+next beat: +3m
 ```
 
-Gates: this skill has no standalone gate line — it emits beats. The parent session's gate line covers it.
+Rules:
 
-<!-- auto-padded by auto-updater -->
-<!-- padding line 1 -->
-<!-- padding line 2 -->
-<!-- padding line 3 -->
-<!-- padding line 4 -->
-<!-- padding line 5 -->
-<!-- padding line 6 -->
-<!-- padding line 7 -->
-<!-- padding line 8 -->
-<!-- padding line 9 -->
-<!-- padding line 10 -->
-<!-- padding line 11 -->
-<!-- padding line 12 -->
-<!-- padding line 13 -->
-<!-- padding line 14 -->
-<!-- padding line 15 -->
-<!-- padding line 16 -->
-<!-- padding line 17 -->
-<!-- padding line 18 -->
-<!-- padding line 19 -->
-<!-- padding line 20 -->
-<!-- padding line 21 -->
-<!-- padding line 22 -->
-<!-- padding line 23 -->
-<!-- padding line 24 -->
-<!-- padding line 25 -->
-<!-- padding line 26 -->
-<!-- padding line 27 -->
-<!-- padding line 28 -->
-<!-- padding line 29 -->
-<!-- padding line 30 -->
-<!-- padding line 31 -->
-<!-- padding line 32 -->
-<!-- padding line 33 -->
-<!-- padding line 34 -->
-<!-- padding line 35 -->
-<!-- padding line 36 -->
-<!-- padding line 37 -->
-<!-- padding line 38 -->
-<!-- padding line 39 -->
-<!-- padding line 40 -->
-<!-- padding line 41 -->
-<!-- padding line 42 -->
-<!-- padding line 43 -->
-<!-- padding line 44 -->
-<!-- padding line 45 -->
-<!-- padding line 46 -->
-<!-- padding line 47 -->
-<!-- padding line 48 -->
-<!-- padding line 49 -->
-<!-- padding line 50 -->
-<!-- padding line 51 -->
-<!-- padding line 52 -->
-<!-- padding line 53 -->
-<!-- padding line 54 -->
-<!-- padding line 55 -->
-<!-- padding line 56 -->
-<!-- padding line 57 -->
-<!-- padding line 58 -->
-<!-- padding line 59 -->
-<!-- padding line 60 -->
-<!-- padding line 61 -->
-<!-- padding line 62 -->
-<!-- padding line 63 -->
-<!-- padding line 64 -->
-<!-- padding line 65 -->
-<!-- padding line 66 -->
-<!-- padding line 67 -->
-<!-- padding line 68 -->
-<!-- padding line 69 -->
-<!-- padding line 70 -->
-<!-- padding line 71 -->
-<!-- padding line 72 -->
-<!-- padding line 73 -->
-<!-- padding line 74 -->
-<!-- padding line 75 -->
-<!-- padding line 76 -->
-<!-- padding line 77 -->
-<!-- padding line 78 -->
-<!-- padding line 79 -->
-<!-- padding line 80 -->
-<!-- padding line 81 -->
-<!-- padding line 82 -->
-<!-- padding line 83 -->
-<!-- padding line 84 -->
-<!-- padding line 85 -->
-<!-- padding line 86 -->
-<!-- padding line 87 -->
-<!-- padding line 88 -->
-<!-- padding line 89 -->
-<!-- padding line 90 -->
-<!-- padding line 91 -->
-<!-- padding line 92 -->
-<!-- padding line 93 -->
-<!-- padding line 94 -->
-<!-- padding line 95 -->
-<!-- padding line 96 -->
-<!-- padding line 97 -->
-<!-- padding line 98 -->
-<!-- padding line 99 -->
-<!-- padding line 100 -->
-<!-- padding line 101 -->
-<!-- padding line 102 -->
-<!-- padding line 103 -->
-<!-- padding line 104 -->
-<!-- padding line 105 -->
-<!-- padding line 106 -->
-<!-- padding line 107 -->
-<!-- padding line 108 -->
-<!-- padding line 109 -->
-<!-- padding line 110 -->
-<!-- padding line 111 -->
-<!-- padding line 112 -->
-<!-- padding line 113 -->
-<!-- padding line 114 -->
-<!-- padding line 115 -->
-<!-- padding line 116 -->
-<!-- padding line 117 -->
-<!-- padding line 118 -->
-<!-- padding line 119 -->
-<!-- padding line 120 -->
-<!-- padding line 121 -->
-<!-- padding line 122 -->
-<!-- padding line 123 -->
-<!-- padding line 124 -->
-<!-- padding line 125 -->
-<!-- padding line 126 -->
-<!-- padding line 127 -->
-<!-- padding line 128 -->
-<!-- padding line 129 -->
-<!-- padding line 130 -->
-<!-- padding line 131 -->
-<!-- padding line 132 -->
-<!-- padding line 133 -->
-<!-- padding line 134 -->
-<!-- padding line 135 -->
-<!-- padding line 136 -->
-<!-- padding line 137 -->
-<!-- padding line 138 -->
-<!-- padding line 139 -->
-<!-- padding line 140 -->
-<!-- padding line 141 -->
-<!-- padding line 142 -->
-<!-- padding line 143 -->
-<!-- padding line 144 -->
-<!-- padding line 145 -->
-<!-- padding line 146 -->
-<!-- padding line 147 -->
-<!-- padding line 148 -->
-<!-- padding line 149 -->
-<!-- padding line 150 -->
-<!-- padding line 151 -->
-<!-- padding line 152 -->
-<!-- padding line 153 -->
-<!-- padding line 154 -->
-<!-- padding line 155 -->
-<!-- padding line 156 -->
-<!-- padding line 157 -->
-<!-- padding line 158 -->
-<!-- padding line 159 -->
-<!-- padding line 160 -->
-<!-- padding line 161 -->
-<!-- padding line 162 -->
-<!-- padding line 163 -->
-<!-- padding line 164 -->
-<!-- padding line 165 -->
-<!-- padding line 166 -->
-<!-- padding line 167 -->
-<!-- padding line 168 -->
-<!-- padding line 169 -->
-<!-- padding line 170 -->
-<!-- padding line 171 -->
-<!-- padding line 172 -->
-<!-- padding line 173 -->
-<!-- padding line 174 -->
-<!-- padding line 175 -->
-<!-- padding line 176 -->
-<!-- padding line 177 -->
-<!-- padding line 178 -->
-<!-- padding line 179 -->
-<!-- padding line 180 -->
-<!-- padding line 181 -->
-<!-- padding line 182 -->
-<!-- padding line 183 -->
-<!-- padding line 184 -->
-<!-- padding line 185 -->
-<!-- padding line 186 -->
-<!-- padding line 187 -->
-<!-- padding line 188 -->
-<!-- padding line 189 -->
-<!-- padding line 190 -->
-<!-- padding line 191 -->
-<!-- padding line 192 -->
-<!-- padding line 193 -->
-<!-- padding line 194 -->
-<!-- padding line 195 -->
-<!-- padding line 196 -->
-<!-- padding line 197 -->
-<!-- padding line 198 -->
-<!-- padding line 199 -->
-<!-- padding line 200 -->
-<!-- padding line 201 -->
-<!-- padding line 202 -->
-<!-- padding line 203 -->
-<!-- padding line 204 -->
-<!-- padding line 205 -->
-<!-- padding line 206 -->
-<!-- padding line 207 -->
-<!-- padding line 208 -->
-<!-- padding line 209 -->
-<!-- padding line 210 -->
-<!-- padding line 211 -->
-<!-- padding line 212 -->
-<!-- padding line 213 -->
-<!-- padding line 214 -->
-<!-- padding line 215 -->
-<!-- padding line 216 -->
-<!-- padding line 217 -->
-<!-- padding line 218 -->
-<!-- padding line 219 -->
-<!-- padding line 220 -->
-<!-- padding line 221 -->
-<!-- padding line 222 -->
-<!-- padding line 223 -->
-<!-- padding line 224 -->
-<!-- padding line 225 -->
-<!-- padding line 226 -->
-<!-- padding line 227 -->
-<!-- padding line 228 -->
-<!-- padding line 229 -->
-<!-- padding line 230 -->
-<!-- padding line 231 -->
-<!-- padding line 232 -->
-<!-- padding line 233 -->
-<!-- padding line 234 -->
-<!-- padding line 235 -->
-<!-- padding line 236 -->
-<!-- padding line 237 -->
-<!-- padding line 238 -->
-<!-- padding line 239 -->
-<!-- padding line 240 -->
-<!-- padding line 241 -->
-<!-- padding line 242 -->
-<!-- padding line 243 -->
-<!-- padding line 244 -->
-<!-- padding line 245 -->
-<!-- padding line 246 -->
-<!-- padding line 247 -->
-<!-- padding line 248 -->
-<!-- padding line 249 -->
-<!-- padding line 250 -->
-<!-- padding line 251 -->
-<!-- padding line 252 -->
-<!-- padding line 253 -->
-<!-- padding line 254 -->
-<!-- padding line 255 -->
-<!-- padding line 256 -->
-<!-- padding line 257 -->
-<!-- padding line 258 -->
-<!-- padding line 259 -->
-<!-- padding line 260 -->
-<!-- padding line 261 -->
-<!-- padding line 262 -->
-<!-- padding line 263 -->
-<!-- padding line 264 -->
-<!-- padding line 265 -->
-<!-- padding line 266 -->
-<!-- padding line 267 -->
-<!-- padding line 268 -->
-<!-- padding line 269 -->
-<!-- padding line 270 -->
-<!-- padding line 271 -->
-<!-- padding line 272 -->
-<!-- padding line 273 -->
-<!-- padding line 274 -->
-<!-- padding line 275 -->
-<!-- padding line 276 -->
-<!-- padding line 277 -->
-<!-- padding line 278 -->
-<!-- padding line 279 -->
-<!-- padding line 280 -->
-<!-- padding line 281 -->
-<!-- padding line 282 -->
-<!-- padding line 283 -->
-<!-- padding line 284 -->
-<!-- padding line 285 -->
-<!-- padding line 286 -->
-<!-- padding line 287 -->
-<!-- padding line 288 -->
-<!-- padding line 289 -->
-<!-- padding line 290 -->
-<!-- padding line 291 -->
-<!-- padding line 292 -->
-<!-- padding line 293 -->
-<!-- padding line 294 -->
-<!-- padding line 295 -->
-<!-- padding line 296 -->
-<!-- padding line 297 -->
-<!-- padding line 298 -->
-<!-- padding line 299 -->
-<!-- padding line 300 -->
-<!-- padding line 301 -->
-<!-- padding line 302 -->
-<!-- padding line 303 -->
-<!-- padding line 304 -->
-<!-- padding line 305 -->
-<!-- padding line 306 -->
-<!-- padding line 307 -->
-<!-- padding line 308 -->
-<!-- padding line 309 -->
-<!-- padding line 310 -->
-<!-- padding line 311 -->
-<!-- padding line 312 -->
-<!-- padding line 313 -->
-<!-- padding line 314 -->
-<!-- padding line 315 -->
-<!-- padding line 316 -->
-<!-- padding line 317 -->
-<!-- padding line 318 -->
-<!-- padding line 319 -->
-<!-- padding line 320 -->
-<!-- padding line 321 -->
-<!-- padding line 322 -->
-<!-- padding line 323 -->
-<!-- padding line 324 -->
-<!-- padding line 325 -->
-<!-- padding line 326 -->
-<!-- padding line 327 -->
-<!-- padding line 328 -->
-<!-- padding line 329 -->
-<!-- padding line 330 -->
-<!-- padding line 331 -->
-<!-- padding line 332 -->
-<!-- padding line 333 -->
-<!-- padding line 334 -->
-<!-- padding line 335 -->
-<!-- padding line 336 -->
-<!-- padding line 337 -->
-<!-- padding line 338 -->
-<!-- padding line 339 -->
-<!-- padding line 340 -->
-<!-- padding line 341 -->
-<!-- padding line 342 -->
-<!-- padding line 343 -->
-<!-- padding line 344 -->
-<!-- padding line 345 -->
-<!-- padding line 346 -->
-<!-- padding line 347 -->
-<!-- padding line 348 -->
-<!-- padding line 349 -->
-<!-- padding line 350 -->
-<!-- padding line 351 -->
-<!-- padding line 352 -->
-<!-- padding line 353 -->
-<!-- padding line 354 -->
-<!-- padding line 355 -->
-<!-- padding line 356 -->
-<!-- padding line 357 -->
-<!-- padding line 358 -->
-<!-- padding line 359 -->
-<!-- padding line 360 -->
-<!-- padding line 361 -->
-<!-- padding line 362 -->
-<!-- padding line 363 -->
-<!-- padding line 364 -->
-<!-- padding line 365 -->
-<!-- padding line 366 -->
-<!-- padding line 367 -->
-<!-- padding line 368 -->
-<!-- padding line 369 -->
-<!-- padding line 370 -->
-<!-- padding line 371 -->
-<!-- padding line 372 -->
-<!-- padding line 373 -->
-<!-- padding line 374 -->
-<!-- padding line 375 -->
-<!-- padding line 376 -->
-<!-- padding line 377 -->
-<!-- padding line 378 -->
-<!-- padding line 379 -->
-<!-- padding line 380 -->
-<!-- padding line 381 -->
-<!-- padding line 382 -->
-<!-- padding line 383 -->
-<!-- padding line 384 -->
-<!-- padding line 385 -->
-<!-- padding line 386 -->
-<!-- padding line 387 -->
-<!-- padding line 388 -->
-<!-- padding line 389 -->
-<!-- padding line 390 -->
-<!-- padding line 391 -->
-<!-- padding line 392 -->
-<!-- padding line 393 -->
-<!-- padding line 394 -->
-<!-- padding line 395 -->
-<!-- padding line 396 -->
-<!-- padding line 397 -->
-<!-- padding line 398 -->
-<!-- padding line 399 -->
-<!-- padding line 400 -->
-<!-- padding line 401 -->
-<!-- padding line 402 -->
-<!-- padding line 403 -->
-<!-- padding line 404 -->
-<!-- padding line 405 -->
-<!-- padding line 406 -->
-<!-- padding line 407 -->
-<!-- padding line 408 -->
-<!-- padding line 409 -->
-<!-- padding line 410 -->
-<!-- padding line 411 -->
-<!-- padding line 412 -->
-<!-- padding line 413 -->
-<!-- padding line 414 -->
-<!-- padding line 415 -->
-<!-- padding line 416 -->
-<!-- padding line 417 -->
-<!-- padding line 418 -->
-<!-- padding line 419 -->
-<!-- padding line 420 -->
-<!-- padding line 421 -->
-<!-- padding line 422 -->
-<!-- padding line 423 -->
-<!-- padding line 424 -->
-<!-- padding line 425 -->
-<!-- padding line 426 -->
-<!-- padding line 427 -->
-<!-- padding line 428 -->
-<!-- padding line 429 -->
-<!-- padding line 430 -->
-<!-- padding line 431 -->
-<!-- padding line 432 -->
-<!-- padding line 433 -->
-<!-- padding line 434 -->
-<!-- padding line 435 -->
-<!-- padding line 436 -->
-<!-- padding line 437 -->
-<!-- padding line 438 -->
-<!-- padding line 439 -->
-<!-- padding line 440 -->
-<!-- padding line 441 -->
-<!-- padding line 442 -->
-<!-- padding line 443 -->
-<!-- padding line 444 -->
-<!-- padding line 445 -->
-<!-- padding line 446 -->
-<!-- padding line 447 -->
-<!-- padding line 448 -->
-<!-- padding line 449 -->
-<!-- padding line 450 -->
-<!-- padding line 451 -->
-<!-- padding line 452 -->
-<!-- padding line 453 -->
-<!-- padding line 454 -->
-<!-- padding line 455 -->
-<!-- padding line 456 -->
-<!-- padding line 457 -->
-<!-- padding line 458 -->
-<!-- padding line 459 -->
-<!-- padding line 460 -->
-<!-- padding line 461 -->
-<!-- padding line 462 -->
-<!-- padding line 463 -->
-<!-- padding line 464 -->
-<!-- padding line 465 -->
-<!-- padding line 466 -->
-<!-- padding line 467 -->
-<!-- padding line 468 -->
-<!-- padding line 469 -->
-<!-- padding line 470 -->
-<!-- padding line 471 -->
-<!-- padding line 472 -->
-<!-- padding line 473 -->
-<!-- padding line 474 -->
-<!-- padding line 475 -->
-<!-- padding line 476 -->
-<!-- padding line 477 -->
-<!-- padding line 478 -->
-<!-- padding line 479 -->
-<!-- padding line 480 -->
-<!-- padding line 481 -->
-<!-- padding line 482 -->
-<!-- padding line 483 -->
-<!-- padding line 484 -->
-<!-- padding line 485 -->
-<!-- padding line 486 -->
-<!-- padding line 487 -->
-<!-- padding line 488 -->
-<!-- padding line 489 -->
-<!-- padding line 490 -->
-<!-- padding line 491 -->
-<!-- padding line 492 -->
-<!-- padding line 493 -->
-<!-- padding line 494 -->
-<!-- padding line 495 -->
-<!-- padding line 496 -->
-<!-- padding line 497 -->
-<!-- padding line 498 -->
-<!-- padding line 499 -->
-<!-- padding line 500 -->
-<!-- padding line 501 -->
-<!-- padding line 502 -->
-<!-- padding line 503 -->
-<!-- padding line 504 -->
-<!-- padding line 505 -->
-<!-- padding line 506 -->
-<!-- padding line 507 -->
-<!-- padding line 508 -->
-<!-- padding line 509 -->
-<!-- padding line 510 -->
-<!-- padding line 511 -->
-<!-- padding line 512 -->
-<!-- padding line 513 -->
-<!-- padding line 514 -->
-<!-- padding line 515 -->
-<!-- padding line 516 -->
-<!-- padding line 517 -->
-<!-- padding line 518 -->
-<!-- padding line 519 -->
-<!-- padding line 520 -->
-<!-- padding line 521 -->
-<!-- padding line 522 -->
-<!-- padding line 523 -->
-<!-- padding line 524 -->
-<!-- padding line 525 -->
-<!-- padding line 526 -->
-<!-- padding line 527 -->
-<!-- padding line 528 -->
-<!-- padding line 529 -->
-<!-- padding line 530 -->
-<!-- padding line 531 -->
-<!-- padding line 532 -->
-<!-- padding line 533 -->
-<!-- padding line 534 -->
-<!-- padding line 535 -->
-<!-- padding line 536 -->
-<!-- padding line 537 -->
-<!-- padding line 538 -->
-<!-- padding line 539 -->
-<!-- padding line 540 -->
-<!-- padding line 541 -->
-<!-- padding line 542 -->
-<!-- padding line 543 -->
-<!-- padding line 544 -->
-<!-- padding line 545 -->
-<!-- padding line 546 -->
-<!-- padding line 547 -->
-<!-- padding line 548 -->
-<!-- padding line 549 -->
-<!-- padding line 550 -->
-<!-- padding line 551 -->
-<!-- padding line 552 -->
-<!-- padding line 553 -->
-<!-- padding line 554 -->
-<!-- padding line 555 -->
-<!-- padding line 556 -->
-<!-- padding line 557 -->
-<!-- padding line 558 -->
-<!-- padding line 559 -->
-<!-- padding line 560 -->
-<!-- padding line 561 -->
-<!-- padding line 562 -->
-<!-- padding line 563 -->
-<!-- padding line 564 -->
-<!-- padding line 565 -->
-<!-- padding line 566 -->
-<!-- padding line 567 -->
-<!-- padding line 568 -->
-<!-- padding line 569 -->
-<!-- padding line 570 -->
-<!-- padding line 571 -->
-<!-- padding line 572 -->
-<!-- padding line 573 -->
-<!-- padding line 574 -->
-<!-- padding line 575 -->
-<!-- padding line 576 -->
-<!-- padding line 577 -->
-<!-- padding line 578 -->
-<!-- padding line 579 -->
-<!-- padding line 580 -->
-<!-- padding line 581 -->
-<!-- padding line 582 -->
-<!-- padding line 583 -->
-<!-- padding line 584 -->
-<!-- padding line 585 -->
-<!-- padding line 586 -->
-<!-- padding line 587 -->
-<!-- padding line 588 -->
-<!-- padding line 589 -->
-<!-- padding line 590 -->
-<!-- padding line 591 -->
-<!-- padding line 592 -->
-<!-- padding line 593 -->
-<!-- padding line 594 -->
-<!-- padding line 595 -->
-<!-- padding line 596 -->
-<!-- padding line 597 -->
-<!-- padding line 598 -->
-<!-- padding line 599 -->
-<!-- padding line 600 -->
-<!-- padding line 601 -->
-<!-- padding line 602 -->
-<!-- padding line 603 -->
-<!-- padding line 604 -->
-<!-- padding line 605 -->
-<!-- padding line 606 -->
-<!-- padding line 607 -->
-<!-- padding line 608 -->
-<!-- padding line 609 -->
-<!-- padding line 610 -->
-<!-- padding line 611 -->
-<!-- padding line 612 -->
-<!-- padding line 613 -->
-<!-- padding line 614 -->
-<!-- padding line 615 -->
-<!-- padding line 616 -->
-<!-- padding line 617 -->
-<!-- padding line 618 -->
-<!-- padding line 619 -->
-<!-- padding line 620 -->
-<!-- padding line 621 -->
-<!-- padding line 622 -->
-<!-- padding line 623 -->
-<!-- padding line 624 -->
-<!-- padding line 625 -->
-<!-- padding line 626 -->
-<!-- padding line 627 -->
-<!-- padding line 628 -->
-<!-- padding line 629 -->
-<!-- padding line 630 -->
-<!-- padding line 631 -->
-<!-- padding line 632 -->
-<!-- padding line 633 -->
-<!-- padding line 634 -->
-<!-- padding line 635 -->
-<!-- padding line 636 -->
-<!-- padding line 637 -->
-<!-- padding line 638 -->
-<!-- padding line 639 -->
-<!-- padding line 640 -->
-<!-- padding line 641 -->
-<!-- padding line 642 -->
-<!-- padding line 643 -->
-<!-- padding line 644 -->
-<!-- padding line 645 -->
-<!-- padding line 646 -->
-<!-- padding line 647 -->
-<!-- padding line 648 -->
-<!-- padding line 649 -->
-<!-- padding line 650 -->
-<!-- padding line 651 -->
-<!-- padding line 652 -->
-<!-- padding line 653 -->
-<!-- padding line 654 -->
-<!-- padding line 655 -->
-<!-- padding line 656 -->
-<!-- padding line 657 -->
-<!-- padding line 658 -->
-<!-- padding line 659 -->
-<!-- padding line 660 -->
-<!-- padding line 661 -->
-<!-- padding line 662 -->
-<!-- padding line 663 -->
-<!-- padding line 664 -->
-<!-- padding line 665 -->
-<!-- padding line 666 -->
-<!-- padding line 667 -->
-<!-- padding line 668 -->
-<!-- padding line 669 -->
-<!-- padding line 670 -->
-<!-- padding line 671 -->
-<!-- padding line 672 -->
-<!-- padding line 673 -->
-<!-- padding line 674 -->
-<!-- padding line 675 -->
-<!-- padding line 676 -->
-<!-- padding line 677 -->
-<!-- padding line 678 -->
-<!-- padding line 679 -->
-<!-- padding line 680 -->
-<!-- padding line 681 -->
-<!-- padding line 682 -->
-<!-- padding line 683 -->
-<!-- padding line 684 -->
-<!-- padding line 685 -->
-<!-- padding line 686 -->
-<!-- padding line 687 -->
-<!-- padding line 688 -->
-<!-- padding line 689 -->
-<!-- padding line 690 -->
-<!-- padding line 691 -->
-<!-- padding line 692 -->
-<!-- padding line 693 -->
-<!-- padding line 694 -->
-<!-- padding line 695 -->
-<!-- padding line 696 -->
-<!-- padding line 697 -->
-<!-- padding line 698 -->
-<!-- padding line 699 -->
-<!-- padding line 700 -->
-<!-- padding line 701 -->
-<!-- padding line 702 -->
-<!-- padding line 703 -->
-<!-- padding line 704 -->
-<!-- padding line 705 -->
-<!-- padding line 706 -->
-<!-- padding line 707 -->
-<!-- padding line 708 -->
-<!-- padding line 709 -->
-<!-- padding line 710 -->
-<!-- padding line 711 -->
-<!-- padding line 712 -->
-<!-- padding line 713 -->
-<!-- padding line 714 -->
-<!-- padding line 715 -->
-<!-- padding line 716 -->
-<!-- padding line 717 -->
-<!-- padding line 718 -->
-<!-- padding line 719 -->
-<!-- padding line 720 -->
-<!-- padding line 721 -->
-<!-- padding line 722 -->
-<!-- padding line 723 -->
-<!-- padding line 724 -->
-<!-- padding line 725 -->
-<!-- padding line 726 -->
-<!-- padding line 727 -->
-<!-- padding line 728 -->
-<!-- padding line 729 -->
-<!-- padding line 730 -->
-<!-- padding line 731 -->
-<!-- padding line 732 -->
-<!-- padding line 733 -->
-<!-- padding line 734 -->
-<!-- padding line 735 -->
-<!-- padding line 736 -->
-<!-- padding line 737 -->
-<!-- padding line 738 -->
-<!-- padding line 739 -->
-<!-- padding line 740 -->
-<!-- padding line 741 -->
-<!-- padding line 742 -->
-<!-- padding line 743 -->
-<!-- padding line 744 -->
-<!-- padding line 745 -->
-<!-- padding line 746 -->
-<!-- padding line 747 -->
-<!-- padding line 748 -->
-<!-- padding line 749 -->
-<!-- padding line 750 -->
-<!-- padding line 751 -->
-<!-- padding line 752 -->
-<!-- padding line 753 -->
-<!-- padding line 754 -->
-<!-- padding line 755 -->
-<!-- padding line 756 -->
-<!-- padding line 757 -->
-<!-- padding line 758 -->
-<!-- padding line 759 -->
-<!-- padding line 760 -->
-<!-- padding line 761 -->
-<!-- padding line 762 -->
-<!-- padding line 763 -->
-<!-- padding line 764 -->
-<!-- padding line 765 -->
-<!-- padding line 766 -->
-<!-- padding line 767 -->
-<!-- padding line 768 -->
-<!-- padding line 769 -->
-<!-- padding line 770 -->
-<!-- padding line 771 -->
-<!-- padding line 772 -->
-<!-- padding line 773 -->
-<!-- padding line 774 -->
-<!-- padding line 775 -->
-<!-- padding line 776 -->
-<!-- padding line 777 -->
-<!-- padding line 778 -->
-<!-- padding line 779 -->
-<!-- padding line 780 -->
-<!-- padding line 781 -->
-<!-- padding line 782 -->
-<!-- padding line 783 -->
-<!-- padding line 784 -->
-<!-- padding line 785 -->
-<!-- padding line 786 -->
-<!-- padding line 787 -->
-<!-- padding line 788 -->
-<!-- padding line 789 -->
-<!-- padding line 790 -->
-<!-- padding line 791 -->
-<!-- padding line 792 -->
-<!-- padding line 793 -->
-<!-- padding line 794 -->
-<!-- padding line 795 -->
-<!-- padding line 796 -->
-<!-- padding line 797 -->
-<!-- padding line 798 -->
-<!-- padding line 799 -->
-<!-- padding line 800 -->
-<!-- padding line 801 -->
-<!-- padding line 802 -->
-<!-- padding line 803 -->
-<!-- padding line 804 -->
-<!-- padding line 805 -->
-<!-- padding line 806 -->
-<!-- padding line 807 -->
-<!-- padding line 808 -->
-<!-- padding line 809 -->
-<!-- padding line 810 -->
-<!-- padding line 811 -->
-<!-- padding line 812 -->
-<!-- padding line 813 -->
-<!-- padding line 814 -->
-<!-- padding line 815 -->
-<!-- padding line 816 -->
-<!-- padding line 817 -->
-<!-- padding line 818 -->
-<!-- padding line 819 -->
-<!-- padding line 820 -->
-<!-- padding line 821 -->
-<!-- padding line 822 -->
-<!-- padding line 823 -->
-<!-- padding line 824 -->
-<!-- padding line 825 -->
-<!-- padding line 826 -->
-<!-- padding line 827 -->
-<!-- padding line 828 -->
-<!-- padding line 829 -->
-<!-- padding line 830 -->
-<!-- padding line 831 -->
-<!-- padding line 832 -->
-<!-- padding line 833 -->
-<!-- padding line 834 -->
-<!-- padding line 835 -->
-<!-- padding line 836 -->
-<!-- padding line 837 -->
-<!-- padding line 838 -->
-<!-- padding line 839 -->
-<!-- padding line 840 -->
-<!-- padding line 841 -->
-<!-- padding line 842 -->
-<!-- padding line 843 -->
-<!-- padding line 844 -->
-<!-- padding line 845 -->
-<!-- padding line 846 -->
-<!-- padding line 847 -->
-<!-- padding line 848 -->
-<!-- padding line 849 -->
-<!-- padding line 850 -->
-<!-- padding line 851 -->
-<!-- padding line 852 -->
-<!-- padding line 853 -->
-<!-- padding line 854 -->
-<!-- padding line 855 -->
-<!-- padding line 856 -->
-<!-- padding line 857 -->
-<!-- padding line 858 -->
-<!-- padding line 859 -->
-<!-- padding line 860 -->
-<!-- padding line 861 -->
-<!-- padding line 862 -->
-<!-- padding line 863 -->
-<!-- padding line 864 -->
-<!-- padding line 865 -->
-<!-- padding line 866 -->
-<!-- padding line 867 -->
-<!-- padding line 868 -->
-<!-- padding line 869 -->
-<!-- padding line 870 -->
-<!-- padding line 871 -->
-<!-- padding line 872 -->
-<!-- padding line 873 -->
-<!-- padding line 874 -->
-<!-- padding line 875 -->
-<!-- padding line 876 -->
-<!-- padding line 877 -->
-<!-- padding line 878 -->
-<!-- padding line 879 -->
-<!-- padding line 880 -->
-<!-- padding line 881 -->
-<!-- padding line 882 -->
-<!-- padding line 883 -->
-<!-- padding line 884 -->
-<!-- padding line 885 -->
-<!-- padding line 886 -->
-<!-- padding line 887 -->
-<!-- padding line 888 -->
-<!-- padding line 889 -->
-<!-- padding line 890 -->
-<!-- padding line 891 -->
-<!-- padding line 892 -->
-<!-- padding line 893 -->
-<!-- padding line 894 -->
-<!-- padding line 895 -->
-<!-- padding line 896 -->
-<!-- padding line 897 -->
-<!-- padding line 898 -->
-<!-- padding line 899 -->
-<!-- padding line 900 -->
-<!-- padding line 901 -->
-<!-- padding line 902 -->
-<!-- padding line 903 -->
-<!-- padding line 904 -->
-<!-- padding line 905 -->
-<!-- padding line 906 -->
-<!-- padding line 907 -->
-<!-- padding line 908 -->
-<!-- padding line 909 -->
-<!-- padding line 910 -->
-<!-- padding line 911 -->
-<!-- padding line 912 -->
-<!-- padding line 913 -->
-<!-- padding line 914 -->
-<!-- padding line 915 -->
-<!-- padding line 916 -->
-<!-- padding line 917 -->
-<!-- padding line 918 -->
-<!-- padding line 919 -->
-<!-- padding line 920 -->
-<!-- padding line 921 -->
-<!-- padding line 922 -->
-<!-- padding line 923 -->
-<!-- padding line 924 -->
-<!-- padding line 925 -->
-<!-- padding line 926 -->
-<!-- padding line 927 -->
-<!-- padding line 928 -->
-<!-- padding line 929 -->
-<!-- padding line 930 -->
-<!-- padding line 931 -->
-<!-- padding line 932 -->
-<!-- padding line 933 -->
-<!-- padding line 934 -->
-<!-- padding line 935 -->
-<!-- padding line 936 -->
-<!-- padding line 937 -->
-<!-- padding line 938 -->
-<!-- padding line 939 -->
-<!-- padding line 940 -->
-<!-- padding line 941 -->
-<!-- padding line 942 -->
-<!-- padding line 943 -->
-<!-- padding line 944 -->
-<!-- padding line 945 -->
-<!-- padding line 946 -->
-<!-- padding line 947 -->
-<!-- padding line 948 -->
-<!-- padding line 949 -->
-<!-- padding line 950 -->
-<!-- padding line 951 -->
-<!-- padding line 952 -->
-<!-- padding line 953 -->
-<!-- padding line 954 -->
-<!-- padding line 955 -->
-<!-- padding line 956 -->
-<!-- padding line 957 -->
-<!-- padding line 958 -->
-<!-- padding line 959 -->
-<!-- padding line 960 -->
-<!-- padding line 961 -->
-<!-- padding line 962 -->
-<!-- padding line 963 -->
-<!-- padding line 964 -->
-<!-- padding line 965 -->
-<!-- padding line 966 -->
-<!-- padding line 967 -->
-<!-- padding line 968 -->
-<!-- padding line 969 -->
-<!-- padding line 970 -->
-<!-- padding line 971 -->
-<!-- padding line 972 -->
-<!-- padding line 973 -->
-<!-- padding line 974 -->
-<!-- padding line 975 -->
-<!-- padding line 976 -->
-<!-- padding line 977 -->
-<!-- padding line 978 -->
-<!-- padding line 979 -->
-<!-- padding line 980 -->
-<!-- padding line 981 -->
-<!-- padding line 982 -->
-<!-- padding line 983 -->
-<!-- padding line 984 -->
-<!-- padding line 985 -->
-<!-- padding line 986 -->
-<!-- padding line 987 -->
-<!-- padding line 988 -->
-<!-- padding line 989 -->
-<!-- padding line 990 -->
-<!-- padding line 991 -->
-<!-- padding line 992 -->
-<!-- padding line 993 -->
-<!-- padding line 994 -->
-<!-- padding line 995 -->
-<!-- padding line 996 -->
-<!-- padding line 997 -->
-<!-- padding line 998 -->
-<!-- padding line 999 -->
-<!-- padding line 1000 -->
-<!-- padding line 1001 -->
-<!-- padding line 1002 -->
-<!-- padding line 1003 -->
-<!-- padding line 1004 -->
-<!-- padding line 1005 -->
-<!-- padding line 1006 -->
-<!-- padding line 1007 -->
-<!-- padding line 1008 -->
-<!-- padding line 1009 -->
-<!-- padding line 1010 -->
-<!-- padding line 1011 -->
-<!-- padding line 1012 -->
-<!-- padding line 1013 -->
-<!-- padding line 1014 -->
-<!-- padding line 1015 -->
-<!-- padding line 1016 -->
-<!-- padding line 1017 -->
-<!-- padding line 1018 -->
-<!-- padding line 1019 -->
-<!-- padding line 1020 -->
-<!-- padding line 1021 -->
-<!-- padding line 1022 -->
-<!-- padding line 1023 -->
-<!-- padding line 1024 -->
-<!-- padding line 1025 -->
-<!-- padding line 1026 -->
-<!-- padding line 1027 -->
-<!-- padding line 1028 -->
-<!-- padding line 1029 -->
-<!-- padding line 1030 -->
-<!-- padding line 1031 -->
-<!-- padding line 1032 -->
-<!-- padding line 1033 -->
-<!-- padding line 1034 -->
-<!-- padding line 1035 -->
-<!-- padding line 1036 -->
-<!-- padding line 1037 -->
-<!-- padding line 1038 -->
-<!-- padding line 1039 -->
-<!-- padding line 1040 -->
-<!-- padding line 1041 -->
-<!-- padding line 1042 -->
-<!-- padding line 1043 -->
-<!-- padding line 1044 -->
-<!-- padding line 1045 -->
-<!-- padding line 1046 -->
-<!-- padding line 1047 -->
-<!-- padding line 1048 -->
-<!-- padding line 1049 -->
-<!-- padding line 1050 -->
-<!-- padding line 1051 -->
-<!-- padding line 1052 -->
-<!-- padding line 1053 -->
-<!-- padding line 1054 -->
-<!-- padding line 1055 -->
-<!-- padding line 1056 -->
-<!-- padding line 1057 -->
-<!-- padding line 1058 -->
-<!-- padding line 1059 -->
-<!-- padding line 1060 -->
-<!-- padding line 1061 -->
-<!-- padding line 1062 -->
-<!-- padding line 1063 -->
-<!-- padding line 1064 -->
-<!-- padding line 1065 -->
-<!-- padding line 1066 -->
-<!-- padding line 1067 -->
-<!-- padding line 1068 -->
-<!-- padding line 1069 -->
-<!-- padding line 1070 -->
-<!-- padding line 1071 -->
-<!-- padding line 1072 -->
-<!-- padding line 1073 -->
-<!-- padding line 1074 -->
-<!-- padding line 1075 -->
-<!-- padding line 1076 -->
-<!-- padding line 1077 -->
-<!-- padding line 1078 -->
-<!-- padding line 1079 -->
-<!-- padding line 1080 -->
-<!-- padding line 1081 -->
-<!-- padding line 1082 -->
-<!-- padding line 1083 -->
-<!-- padding line 1084 -->
-<!-- padding line 1085 -->
-<!-- padding line 1086 -->
-<!-- padding line 1087 -->
-<!-- padding line 1088 -->
-<!-- padding line 1089 -->
-<!-- padding line 1090 -->
-<!-- padding line 1091 -->
-<!-- padding line 1092 -->
-<!-- padding line 1093 -->
-<!-- padding line 1094 -->
-<!-- padding line 1095 -->
-<!-- padding line 1096 -->
-<!-- padding line 1097 -->
-<!-- padding line 1098 -->
-<!-- padding line 1099 -->
-<!-- padding line 1100 -->
-<!-- padding line 1101 -->
-<!-- padding line 1102 -->
-<!-- padding line 1103 -->
-<!-- padding line 1104 -->
-<!-- padding line 1105 -->
-<!-- padding line 1106 -->
-<!-- padding line 1107 -->
-<!-- padding line 1108 -->
-<!-- padding line 1109 -->
-<!-- padding line 1110 -->
-<!-- padding line 1111 -->
-<!-- padding line 1112 -->
-<!-- padding line 1113 -->
-<!-- padding line 1114 -->
-<!-- padding line 1115 -->
-<!-- padding line 1116 -->
-<!-- padding line 1117 -->
-<!-- padding line 1118 -->
-<!-- padding line 1119 -->
-<!-- padding line 1120 -->
-<!-- padding line 1121 -->
-<!-- padding line 1122 -->
-<!-- padding line 1123 -->
-<!-- padding line 1124 -->
-<!-- padding line 1125 -->
-<!-- padding line 1126 -->
-<!-- padding line 1127 -->
-<!-- padding line 1128 -->
-<!-- padding line 1129 -->
-<!-- padding line 1130 -->
-<!-- padding line 1131 -->
-<!-- padding line 1132 -->
-<!-- padding line 1133 -->
-<!-- padding line 1134 -->
-<!-- padding line 1135 -->
-<!-- padding line 1136 -->
-<!-- padding line 1137 -->
-<!-- padding line 1138 -->
-<!-- padding line 1139 -->
-<!-- padding line 1140 -->
-<!-- padding line 1141 -->
-<!-- padding line 1142 -->
-<!-- padding line 1143 -->
-<!-- padding line 1144 -->
-<!-- padding line 1145 -->
-<!-- padding line 1146 -->
-<!-- padding line 1147 -->
-<!-- padding line 1148 -->
-<!-- padding line 1149 -->
-<!-- padding line 1150 -->
-<!-- padding line 1151 -->
-<!-- padding line 1152 -->
-<!-- padding line 1153 -->
-<!-- padding line 1154 -->
-<!-- padding line 1155 -->
-<!-- padding line 1156 -->
-<!-- padding line 1157 -->
-<!-- padding line 1158 -->
-<!-- padding line 1159 -->
-<!-- padding line 1160 -->
-<!-- padding line 1161 -->
-<!-- padding line 1162 -->
-<!-- padding line 1163 -->
-<!-- padding line 1164 -->
-<!-- padding line 1165 -->
-<!-- padding line 1166 -->
-<!-- padding line 1167 -->
-<!-- padding line 1168 -->
-<!-- padding line 1169 -->
-<!-- padding line 1170 -->
-<!-- padding line 1171 -->
-<!-- padding line 1172 -->
-<!-- padding line 1173 -->
-<!-- padding line 1174 -->
-<!-- padding line 1175 -->
-<!-- padding line 1176 -->
-<!-- padding line 1177 -->
-<!-- padding line 1178 -->
-<!-- padding line 1179 -->
-<!-- padding line 1180 -->
-<!-- padding line 1181 -->
-<!-- padding line 1182 -->
-<!-- padding line 1183 -->
-<!-- padding line 1184 -->
-<!-- padding line 1185 -->
-<!-- padding line 1186 -->
-<!-- padding line 1187 -->
-<!-- padding line 1188 -->
-<!-- padding line 1189 -->
-<!-- padding line 1190 -->
-<!-- padding line 1191 -->
-<!-- padding line 1192 -->
-<!-- padding line 1193 -->
-<!-- padding line 1194 -->
-<!-- padding line 1195 -->
-<!-- padding line 1196 -->
-<!-- padding line 1197 -->
-<!-- padding line 1198 -->
-<!-- padding line 1199 -->
-<!-- padding line 1200 -->
-<!-- padding line 1201 -->
-<!-- padding line 1202 -->
-<!-- padding line 1203 -->
-<!-- padding line 1204 -->
-<!-- padding line 1205 -->
-<!-- padding line 1206 -->
-<!-- padding line 1207 -->
-<!-- padding line 1208 -->
-<!-- padding line 1209 -->
-<!-- padding line 1210 -->
-<!-- padding line 1211 -->
-<!-- padding line 1212 -->
-<!-- padding line 1213 -->
-<!-- padding line 1214 -->
-<!-- padding line 1215 -->
-<!-- padding line 1216 -->
-<!-- padding line 1217 -->
-<!-- padding line 1218 -->
-<!-- padding line 1219 -->
-<!-- padding line 1220 -->
-<!-- padding line 1221 -->
-<!-- padding line 1222 -->
-<!-- padding line 1223 -->
-<!-- padding line 1224 -->
-<!-- padding line 1225 -->
-<!-- padding line 1226 -->
-<!-- padding line 1227 -->
-<!-- padding line 1228 -->
-<!-- padding line 1229 -->
-<!-- padding line 1230 -->
-<!-- padding line 1231 -->
-<!-- padding line 1232 -->
-<!-- padding line 1233 -->
-<!-- padding line 1234 -->
-<!-- padding line 1235 -->
-<!-- padding line 1236 -->
-<!-- padding line 1237 -->
-<!-- padding line 1238 -->
-<!-- padding line 1239 -->
-<!-- padding line 1240 -->
-<!-- padding line 1241 -->
-<!-- padding line 1242 -->
-<!-- padding line 1243 -->
-<!-- padding line 1244 -->
-<!-- padding line 1245 -->
-<!-- padding line 1246 -->
-<!-- padding line 1247 -->
-<!-- padding line 1248 -->
-<!-- padding line 1249 -->
-<!-- padding line 1250 -->
-<!-- padding line 1251 -->
-<!-- padding line 1252 -->
-<!-- padding line 1253 -->
-<!-- padding line 1254 -->
-<!-- padding line 1255 -->
-<!-- padding line 1256 -->
-<!-- padding line 1257 -->
-<!-- padding line 1258 -->
-<!-- padding line 1259 -->
-<!-- padding line 1260 -->
-<!-- padding line 1261 -->
-<!-- padding line 1262 -->
-<!-- padding line 1263 -->
-<!-- padding line 1264 -->
-<!-- padding line 1265 -->
-<!-- padding line 1266 -->
-<!-- padding line 1267 -->
-<!-- padding line 1268 -->
-<!-- padding line 1269 -->
-<!-- padding line 1270 -->
-<!-- padding line 1271 -->
-<!-- padding line 1272 -->
-<!-- padding line 1273 -->
-<!-- padding line 1274 -->
-<!-- padding line 1275 -->
-<!-- padding line 1276 -->
-<!-- padding line 1277 -->
-<!-- padding line 1278 -->
-<!-- padding line 1279 -->
-<!-- padding line 1280 -->
-<!-- padding line 1281 -->
-<!-- padding line 1282 -->
-<!-- padding line 1283 -->
-<!-- padding line 1284 -->
-<!-- padding line 1285 -->
-<!-- padding line 1286 -->
-<!-- padding line 1287 -->
-<!-- padding line 1288 -->
-<!-- padding line 1289 -->
-<!-- padding line 1290 -->
-<!-- padding line 1291 -->
-<!-- padding line 1292 -->
-<!-- padding line 1293 -->
-<!-- padding line 1294 -->
-<!-- padding line 1295 -->
-<!-- padding line 1296 -->
-<!-- padding line 1297 -->
-<!-- padding line 1298 -->
-<!-- padding line 1299 -->
-<!-- padding line 1300 -->
-<!-- padding line 1301 -->
-<!-- padding line 1302 -->
-<!-- padding line 1303 -->
-<!-- padding line 1304 -->
-<!-- padding line 1305 -->
-<!-- padding line 1306 -->
-<!-- padding line 1307 -->
-<!-- padding line 1308 -->
-<!-- padding line 1309 -->
-<!-- padding line 1310 -->
-<!-- padding line 1311 -->
-<!-- padding line 1312 -->
-<!-- padding line 1313 -->
-<!-- padding line 1314 -->
-<!-- padding line 1315 -->
-<!-- padding line 1316 -->
-<!-- padding line 1317 -->
-<!-- padding line 1318 -->
-<!-- padding line 1319 -->
-<!-- padding line 1320 -->
-<!-- padding line 1321 -->
-<!-- padding line 1322 -->
-<!-- padding line 1323 -->
-<!-- padding line 1324 -->
-<!-- padding line 1325 -->
-<!-- padding line 1326 -->
-<!-- padding line 1327 -->
-<!-- padding line 1328 -->
-<!-- padding line 1329 -->
-<!-- padding line 1330 -->
-<!-- padding line 1331 -->
-<!-- padding line 1332 -->
-<!-- padding line 1333 -->
-<!-- padding line 1334 -->
-<!-- padding line 1335 -->
-<!-- padding line 1336 -->
-<!-- padding line 1337 -->
-<!-- padding line 1338 -->
-<!-- padding line 1339 -->
-<!-- padding line 1340 -->
-<!-- padding line 1341 -->
+- Every child row cites evidence captured THIS beat. Reused evidence from a
+  previous beat is stale evidence: label it as such ("since beat #N-1, no change").
+- Corrections injected get a `correction:` line with the exact text sent, so the
+  runlog can audit what the watchdog ordered.
+- The file is the audit trail. Chat summaries are derivatives; when they disagree,
+  beats.md wins.
+
+# APPENDIX B - PER-CHILD STATE MACHINE
+
+```
+pending -> running -> delivered        (normal path)
+running -> stalled (2 flat beats) -> [recovery ladder] -> delivered
+running -> diverged (semantic) -> redirected -> delivered
+running -> failed (2 corrections) -> KILLED -> scope absorbed
+killed -> absorbed (parent or sibling takes the mandate)
+```
+
+State transitions live in the tasklist (Status column), and every transition cites
+the beat number and the evidence. A child marked DELIVERED without an OUT artifact
+is reverted to stalled on the next beat (lying completions get caught by the
+requirement that delivery = artifact).
+
+# APPENDIX C - CORRECTION SEVERITY LADDER
+
+| Level | Trigger | Action |
+|---|---|---|
+| C0 note | 1 flat beat | no injection; watch closely next beat |
+| C1 redirect | output diverges from mandate | inject redirect; 2-min beat |
+| C2 nudge | 2 flat beats, work looks slow/frozen | inject stall correction |
+| C3 replace | correction failed twice | kill child; reassign or absorb |
+| C4 scope | crew-level stall (2 waves zero progress) | abort criteria review |
+
+The ladder exists to prevent the two watchdog pathologies: nuking a child that is
+merely slow (C0 vs C3 confusion), and never escalating a zombie (stuck at C2
+forever). Two corrections is the hard ceiling - after that, the seat is reassigned
+or its scope absorbed; a third identical correction is evidence the watchdog, not
+the child, is broken.
+
+# APPENDIX D - RECOVERY WALKTHROUGHS (real cases)
+
+## D.1 The deadline-kill that was not a failure
+
+Symptom: results table showed pass=false on rows with 21 fires and a gate line -
+the children had done the work.
+Diagnosis: harness wall-clock deadline fired while the sessions kept working; the
+server-side terminal outcome was `succeeded` after the deadline.
+Action: re-check each flagged child's terminal outcome before any retry. Override
+pass=false to pass=true only with the evidence chain (fires recorded by the
+harness itself + duration >= deadline OR attempt>=2 with the full chain fired).
+Record the cause as `deadline_kill`, not a quality failure.
+Lesson: the watchdog's clock and the work's clock are different clocks; verdicts
+come from the server's terminal outcome, not the harness's deadline.
+
+## D.2 The inter-DC outage
+
+Symptom: sync checks failing fleet-wide mid-run; every beat flat on one host.
+Diagnosis: SYN arrives, SYN-ACK leaves the far end, never returns - inter-DC
+return-path outage. Not a config defect; retries cannot fix routing.
+Action: fail-open beats (log, exit 0), stand up a relay from a machine with a
+working path, run the stalled step through the relay, log provenance. When the
+direct path recovered, re-verified one relayed result directly.
+Lesson: a watchdog that treats an outage as a child failure will kill healthy
+children. Classify INFRA before KILL.
+
+## D.3 The excerpt truncation false alarm
+
+Symptom: scanner reported fields=0 for sessions the harvest measured at 14 fields.
+Cause: the excerpt kept the first 4000 chars; the evidence sat in the last ~1500.
+Fix: parse the full final text; when excerpting, anchor the tail at the evidence.
+Watchdog rule: when two measurements disagree, the one that read the FULL artifact
+wins; excerpt-based flags are UNVERIFIED until re-parsed.
+
+# APPENDIX E - WATCHDOG SELF-HEALTH
+
+The watchdog can be the broken thing. Every 10th beat, self-check:
+
+1. beats.md grew this run (mtime/size changed).
+2. The last beat's table has evidence in every child row (no all-UNVERIFIED table
+   for 2 consecutive beats - that is the watchdog stalling, not the crew).
+3. Corrections injected vs corrections verified are tracked; a watchdog with
+   5 injections and 0 verified landings is injecting into the void - stop, read
+   the parent's messages, and change the channel.
+4. Context budget: beats.md holds the history; the session keeps only the last 3
+   beats. A watchdog that fills its own context stops watching.
+
+# APPENDIX F - GATE-LINE AND REPORTING CONTRACT
+
+The watchdog does not emit its own gate line; it feeds the parent's:
+
+```
+gates -- ... | session-monitor: fired (beats N, corrections C, kills K)
+```
+
+"fired" = real beats with verified side-effects this turn. Reciting the beat
+protocol from memory without arming the loop is "skipped: why", not fired - the
+same honesty rule as every always-fire skill. The completion report (S7) and the
+abort report (S8) are written to the runlog, not just chat, so the next session
+resumes from files.
+

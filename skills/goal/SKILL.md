@@ -1,176 +1,519 @@
 ---
 name: goal
-description: Goal-driven iteration engine — drive any declared goal to DONE by looping the full skill stack (ideas → specialist agents → subagents → verification → honestscore) until a compound stop condition fires. Use whenever the user declares a goal, target, or "keep going until X" — especially long-running autonomous pushes (48 hours to 10 days), loop-until-score runs (9.5/9.8), or any task needing unique ideas every iteration plus a 10–30 subagent crew. Routes each slice to a matching specialist agent when one exists (.opencode/agents or ~/.config/opencode/agents). Guarantees unique, non-repeated attempts via a fingerprinted idea ledger, survives context resets via file-based state, and never trusts self-reported done.
-metadata:
-  opencode/slash: "true"
+description: Goal-driven iteration engine - drive any declared goal to DONE by looping the full skill stack (ideas -> specialist agents -> subagents -> verification -> honestscore) until a compound stop condition fires. Use whenever the user declares a goal, target, or "keep going until X" - especially long autonomous pushes (48 hours to 10 days), loop-until-score runs (9.5/9.8), or any task needing unique ideas every iteration plus a 10-30 subagent crew.
+alwaysFire: true
 ---
 
-# goal — Goal-Driven Iteration Engine
+# goal - The Goal-Driven Iteration Engine
 
-You are running the **Goal Skill**. A goal has been declared. Your job is not to attempt it once — it is to run a disciplined loop (unique idea → crew execution → external verification → honest score) until an EXHAUSTIVE, pre-frozen stop condition fires. The loop's memory lives in files, never in context.
+## 0. IDENTITY
 
-## 0) HARD RULES
+goal is the loop engine. When the user declares a goal ("keep going until X",
+"48 hours to 10 days", "loop until >= 9.5", "drive this to done"), this skill owns
+the run: it declares the goal, locks a definition-of-done, iterates the full skill
+stack, tracks every attempt in a fingerprinted ledger, schedules work in waves, and
+stops ONLY on a compound stop condition (done, or abort criteria honestly fired).
 
-1. **The contract is frozen before run start.** Write `GOAL.md` + `goal-state.json` FIRST; the loop never edits its own exam mid-run. If the goal itself changes, that is a NEW goal: rewrite the contract, reset the stall counters, keep the ledger.
-2. **Done is machine-checkable, never vibes.** The Definition of Done is ≤5 SHELL-CHECKABLE criteria (test passes, build exits 0, file exists, endpoint 200, score ≥ N printed by a script). If the goal cannot be expressed this way, split or sharpen it first — a natural-language "is it done?" check defaults to *not done* forever (AutoGPT lesson).
-3. **Every iteration produces a UNIQUE attempt.** No idea enters execution without passing the Uniqueness Gate (§4) against the attempts ledger. Same idea in new words = repeat = rejected.
-4. **Never trust self-reported success** — not the executor's, not a subagent's `status: success`. Verify real side effects: exit codes, files on disk, test output pasted. A claimed artifact with no artifact is a failed iteration.
-5. **Every loop has BOTH an exit condition AND a hard cap**, and both are written in the contract before iteration 1.
-6. **Stall ≠ pause.** Two iterations with no measured progress → forced replan into a different approach class. Three → escalate (§6). Never silently repeat a failed step.
-7. **The orchestrator owns merge and verification.** Subagents never write the final deliverable and hand off via file pointers, never prose scrollback. Nested spawn is allowed ONLY when `experimental.subagent_depth` is ≥2 in the live config AND the child is a specialist whose `subagent` permission allows the named grandchildren — otherwise children must not spawn (default depth is 1; the check is §5a).
-8. **A cap that trips while the goal is still actively progressing (no plateau declared) means the stop condition was mis-sized** — diagnose in the ledger before raising it. A declared budget cap firing at a plateau is a legitimate close (§6.2), not a defect.
+The three laws:
 
-## 1) Phase 0 — the Goal Contract (before iteration 1)
+1. NEVER trust self-reported done. A goal is DONE only when every DoD criterion has
+   external evidence attached (command output, artifact, measurement).
+2. NEVER repeat an attempt. Every iteration must carry a NEW idea fingerprint
+   (Section 5); a repeated idea without new evidence is a stalled run, not progress.
+3. NEVER run forever. The abort cap (Section 7) ends honestly what cannot end well.
 
-Write `GOAL.md` — a contract-shaped goal (davidondrej `/goal` pattern + Anthropic harnesses):
+## 1. TRIGGER
+
+This skill fires when the user message contains a declared goal, target, or
+stop-condition phrasing:
+
+- "keep going until X", "loop until X", "get to X"
+- "48 hours to ...", "10 days of ...", "until it hits N"
+- "iterate until score >= N", "do not stop until ..."
+- A numeric target with no deadline ("rank top 3", "9.5/10", "100% gate rate")
+- An explicit "activate goal skill" / "@goal" reference
+
+A task WITHOUT a declared end-state ("fix this bug") is an ordinary task - do the
+work, do not spin up a goal loop. A goal loop exists for compound, long-horizon,
+or quality-threshold objectives.
+
+## 2. STEP 1 - PARSE THE GOAL DECLARATION
+
+Extract, in writing, before any iteration:
 
 ```
-# GOAL: <one objective — ONE. This is not a backlog.>
-## Read-first        — files/repos/docs the loop must load at boot
-## Constraints       — stack, style, budget, out-of-scope list
-## Validate          — THE one exact command (or ≤5) that proves done, with expected output
-## Stop-when         — verifiable end state (ties to the DoD checks in goal-state.json)
-## Budget            — iteration cap (default 200 — an honesty review point, NOT a cost saver; quota posture belongs to the operator), wall-clock cap (48h–10d), score target (the honestscore MIN the loop must reach, e.g. 9.5 or 9.8)
+GOAL:        <one sentence, the user's words cleaned up>
+DOJ:         <what DONE means - observable state, not effort>
+DO-NOT:      <explicit non-goals; scope the loop does not touch>
+STOP-SCORE:  <honestscore threshold, or "n/a">
+CAPS:        <max rounds / max wall-clock / max cost - declared or defaults>
+EVIDENCE:    <how completion will be proven: the exact check(s)>
 ```
 
-Write `goal-state.json` (JSON over Markdown — resists agent overwriting; Anthropic finding):
+Defaults when the user declared none:
+
+- CAPS: 20 rounds, 48h wall-clock, declared tool-call budget.
+- STOP-SCORE: 9.0 for docs/sites, 9.5 for critical code (from honestscore).
+- COMPOUND STOP: goal met AND honestscore >= threshold AND no open defect tickets.
+
+If the goal is ambiguous (no observable DONE state), ask ONE clarifying question
+before arming - this is a real manual input, not a permission-ask. If unanswerable,
+construct the most defensible interpretation, state it in the ledger, and proceed.
+
+## 3. STEP 2 - DEFINITION OF DONE (DoD)
+
+DoD criteria are MEASURABLE statements, each with its falsifier:
+
+```
+DoD-1: gate-line rate >= 90% across 20 tasks | falsifier: independent re-scan
+DoD-2: every results row has a terminal outcome recorded     | falsifier: grep
+DoD-3: honestscore of the final report >= 9.0                 | falsifier: score block
+```
+
+Rules:
+- Each criterion names the check that can come out the other way. "Looks good" is
+  not a criterion.
+- Count-based criteria state the denominator ("10/10", not "all").
+- The DoD list is FROZEN once the loop starts; mid-run changes require re-declaring
+  the goal (fingerprint change, Section 5) so the ledger never mixes runs.
+- Include at least one regression criterion: the things that already worked still
+  work.
+
+## 4. STEP 3 - STATE FILE (survives context resets)
+
+The loop's memory lives in files, never in chat context:
+
+```
+./goal-state/
+  GOAL.md          # the parsed goal, DoD, caps, compound stop condition
+  ledger.jsonl     # fingerprinted idea ledger (Section 5)
+  tasklist.md      # the crew tasklist (subagents protocol, Section 7)
+  beats.md         # monitor beats (session-monitor-auto writes these)
+  CONTINUE-HERE.md # refresh at every milestone, not only at the end
+```
+
+Every round: update ledger, tasklist, and CONTINUE-HERE BEFORE context grows. A
+context reset (or a fresh session on another machine) must be able to resume by
+reading goal-state alone. If the run can survive `rm -rf` of your memory, the state
+is correct.
+
+## 5. STEP 4 - THE FINGERPRINTED IDEA LEDGER
+
+Every iteration's approach is fingerprinted BEFORE execution:
+
+```
+fingerprint = hash(normalize(essence-of-approach))
+```
+
+- The fingerprint covers the APPROACH, not the wording: what will be tried, on what
+  surface, by what mechanism. (Example: "add prune logic to sync script guarded by
+  allowlist" and "sync script: allowlist-guarded prune" share a fingerprint.)
+- ledger.jsonl is append-only. One JSON object per attempt:
 
 ```json
-{
-  "goal": "...", "created": "<iso>", "iteration": 0,
-  "dod": [{"check": "<shell-checkable>", "cmd": "<exact command>", "passes": false}],
-  "score_target": 9.5, "verdict_allowlist": ["approved", "ready"],
-  "stops": {"max_iterations": 200, "wall_clock": "<iso deadline>", "no_progress_replan": 2, "no_progress_escalate": 3},
-  "status": "pursuing"
-}
+{"n": 7, "fp": "a1b2c3d4e5f60718", "idea": "one-line approach",
+ "source": "ideas-round-3|user|subagent-S4", "wave": "3",
+ "result": "pending|pass|fail|partial", "evidence": "path-or-command",
+ "defects": ["ticket-ids"], "ts": "2026-11-12T14:03Z"}
 ```
 
-`passes` flags start `false`. The agent cannot quietly redefine done mid-run. Initialize `attempts.jsonl` (empty) and `progress.md` (boot notes, one section per iteration).
+Uniqueness rule: before executing an attempt, hash it. If the fingerprint exists in
+the ledger with a terminal result (pass/fail) and NO new evidence has arrived since,
+REJECT the attempt - go to ideas for a genuinely different approach. Retrying the
+same idea is only legitimate when the prior attempt failed for an infra reason
+(retry-after-timeout), and then the ledger entry records "retry, cause=infra".
 
-## 2) State layout (the loop's whole memory)
+The ledger is also the anti-loop proof: two attempts with the same fingerprint and
+no state change between them = the run is looping = abort criteria candidate
+(Section 8).
 
-**All state lives in ONE run dir:** `.opencode/runs/goal-<slug>/` where `<slug>` = kebab-case first ~5 words of the goal, fixed at Phase 0. `<goal-slug>` everywhere below means this dir.
+## 6. STEP 5 - WAVE SCHEDULING (the crew)
 
-| File | Role | Written |
+Each iteration decomposes the remaining work into disjoint mandates and schedules
+waves per the subagents protocol (floor 5 / ceiling 30, 5-8 launches per message,
+tasklist-first, depth-1). The goal engine's additions:
+
+- Wave 0 (once): recon the current state; produce the baseline measurement the
+  future rounds compare against. No baseline = no honest "improved".
+- Every wave launch updates tasklist.md rows; every delivery updates the ledger.
+- Seats never edit the goal state files; only the orchestrator writes ledger.jsonl
+  (single-writer rule).
+- An iteration ends when its wave evidence is merged and verified - not when the
+  seats return.
+
+## 7. STEP 6 - THE LOOP (one iteration, in order)
+
+```
+1. READ state (goal-state dir is the truth, not chat memory)
+2. PICK the highest-leverage open gap (largest DoD gap with the cheapest falsifier)
+3. IDEAS: if the last attempt failed, generate >= 3 distinct approaches; fingerprint
+   each; reject ledger repeats; pick by evidence
+4. TASKLIST: update rows for this round's crew
+5. LAUNCH the wave (single message, 5-8 seats, disjoint mandates)
+6. MONITOR: arm session-monitor-auto; beats every 3-5 min with real side-effects
+7. MERGE: evidence wins conflicts; verify-after-merge (recompute claims)
+8. VERIFY: run the round's falsifiers; attach outputs to the ledger entry
+9. SCORE: honestscore on the round's deliverable -> score into ledger
+10. CHECK STOP: compound stop condition (Section 9)
+11. PERSIST: ledger, tasklist, CONTINUE-HERE, brain notes (root causes immediately)
+```
+
+The loop NEVER advances on assumption: step 8 requires real output (command exit
+codes, files, counts). A round whose only product is chat text is not a round.
+
+## 8. STOP CONDITIONS (compound)
+
+The run stops when ALL of:
+
+1. Every DoD criterion has external evidence attached (falsifier passed).
+2. honestscore on the final deliverable >= threshold (or UNVERIFIED items resolved).
+3. The regression check passed (nothing that worked before broke).
+4. The adversarial pass found no surviving refutation.
+5. Evidence persisted: ledger + CONTINUE-HERE + brain note written.
+
+Partial credit does not exist: if 9 of 10 DoD rows pass and the 10th is UNVERIFIED,
+the goal is not DONE. Either close it or declare the honest stop (Section 9).
+
+## 8.1 THE ABORT CAP (stop honestly, not optimistically)
+
+Abort when ANY of:
+
+- ROUNDS: 2 full repair rounds with no net-new DoD progress (no new evidence for
+  any criterion).
+- BUDGET: declared round/wall-clock/cost cap hit.
+- BLOCKER: the same blocker returned twice after correction attempts.
+- INPUT: a missing manual input only the user can supply (credential, approval,
+  payment) - stop and name exactly that one item (the user does only three kinds of
+  things: supply a new credential, register something in their name, pay).
+- INFRA: the environment is unrecoverable (service down, no path).
+
+On abort:
+1. Write ABORTED + criterion + evidence to GOAL.md and the ledger.
+2. Save all partials (files, results, branch/worktree state).
+3. Report: what was completed (with evidence), what is unfinished, the EXACT next
+   steps and file locations for resume.
+4. NEVER fake completion on an abort. An honest 7/10 with the blocker named beats
+   a fabricated 10/10 - and the ledger makes the fabrication auditable anyway.
+
+
+## 9. THE FINGERPRINT LEDGER AND /ideas (how failures feed back)
+
+When a round fails (honestscore < threshold, or a falsifier fires):
+1. Ticket each defect (honestscore ticket format).
+2. Skill(ideas) on the highest-severity ticket: >= 3 DISTINCT approaches, scored.
+3. The chosen approach's fingerprint goes into the ledger BEFORE the work starts
+   (pre-commitment: you cannot retroactively claim novelty).
+4. If ideas cannot produce a fingerprint that differs from all failed attempts, the
+   approach space is exhausted -> escalate: change the frame (different tool,
+   different scope, ask the user for the missing input) rather than repeat.
+
+This is the anti-thrash mechanism: the fleet measured that loops without
+fingerprinting repeat the same failed fix up to the cap and call it iteration.
+
+## 10. HEARTBEAT (mandatory for any run > 5 min)
+
+Arm session-monitor-auto the moment the loop starts. Beats verify REAL side-effects:
+
+- ledger.jsonl grew (new attempt rows)
+- tasklist rows transitioned (pending -> delivered)
+- artifacts changed on disk (size/mtime/hash)
+- process/session alive
+
+Two flat beats = stall: diagnose (frozen process? dependency block? provider
+outage?), recover (re-run / resume from the last ledger entry / re-dispatch the
+seat), report the pulse. Never report "still running" without a side-effect.
+
+## 11. CONTINUITY AND BRAIN PERSISTENCE
+
+At every milestone (not only at the end):
+1. Update CONTINUE-HERE-<date>-<goal-slug>.md in the backup dir: DONE / UNFINISHED /
+   EXACT next steps + file locations - written so a fresh session on any machine
+   can resume from the static resume prompt.
+2. Append durable findings to the relevant brain workspace knowledge note
+   (date-stamped, verified facts, rejected alternatives with reasons).
+3. Root causes and gotchas go to the runbook the moment they are found
+   (symptom -> cause -> fix), not at the end.
+4. Durable changes get a GitHub record (commit + push + verify), per the standing
+   directive.
+
+## 12. WORKED EXAMPLE (compressed, real shape)
+
+User goal: "keep iterating the fleet proof run until gate rate >= 90% on all 20
+tasks, max 2 relaunch rounds."
+
+- GOAL.md written; DoD: D1 gate-rate >= 90% measured by the independent scanner
+  (not the stored flags); D2 >= 7 unique fires per task; D3 honestscore of the
+  closure report >= 9.0; CAPS: 2 relaunch rounds.
+- Baseline (wave 0): fresh harvest -> 40% strict rate, 17 flag mismatches. The gap
+  is real; the loop is justified.
+- Round 1: fingerprint "full-text-reparse-adj-tail" -> rebuild results with full
+  final-text parsing -> 100% chat-gate, 40% strict. DoD1 still open. Ledger: pass.
+- Round 2: fingerprint "restart-serve-plugin-reload" -> restart serves, re-run the
+  12 non-canonical tasks in shards (3/box concurrent) -> strict 100%, mismatches 0.
+- Verify-after-merge: independent recompute from the merged file = 20/20.
+- Adversarial: provenance attack (were the passes post-restart?) survived.
+- honestscore report 9.1 -> DONE. All evidence in runlogs + ledger; CONTINUE-HERE
+  updated; relaunch rounds used: 0 of 2 (reported honestly).
+
+## 13. INTEGRATION
+
+- promptgod/godmode: the goal loop runs inside the godmode protocol; it inherits
+  the gate-line obligation.
+- subagents: crew protocol for every wave; the tasklist format is shared.
+- session-monitor-auto: the watchdog for the loop; its beats are the loop's pulse.
+- ideas: every failed round feeds it; every approach it produces is fingerprinted.
+- honestscore: the per-iteration and final quality gate; its score is a stop
+  condition input.
+- skill-frozen-spec: for runs with a locked spec, the DoD freeze defers to the
+  frozen spec's hash; drift = abort-and-redeclare, not silent scope creep.
+
+## 14. GATE-LINE CONTRIBUTION
+
+The goal engine's turn emits its state in the parent's gate line:
+
+```
+goal: fired (round N, ledger M ideas, DoD k/j met)
+```
+
+"fired" = real ledger writes and wave launches this turn. A goal declared in prose
+with no state file is "skipped: why" in the gate line - the loop exists in files,
+not in intention.
+
+## 15. DO / DON'T
+
+| DO | DON'T |
+|---|---|
+| Parse the goal into DoD with falsifiers | Treat the vibe of the request as the DoD |
+| Fingerprint every attempt before running | Re-run a failed idea and call it new |
+| Persist state every round | Trust chat context to survive |
+| Score every round with honestscore | Claim DONE on a self-report |
+| Abort at the cap, honestly | Loop forever on a dead approach |
+| Escalate the missing-input item to the user | Ask permission for in-scope work |
+| Verify side-effects every beat | Report "still running" on trust |
+
+---
+
+# APPENDIX A - DoD CRITERION CATALOG (with falsifiers)
+
+Pick criteria from here; every one must be closable by a check that can fail.
+
+| Type | Criterion template | Falsifier |
 |---|---|---|
-| `GOAL.md` | Frozen contract; re-injected every iteration (anti-drift) | Phase 0 only |
-| `goal-state.json` | DoD flags, counters, stop config, status | every iteration end |
-| `attempts.jsonl` | Idea ledger: `{n, fingerprint, hypothesis, test, outcome, delta, verdict}` | every iteration end |
-| `progress.md` | Human-readable lab notes + decisions + blockers | every iteration |
-| `HANDOFF.md` | Objective / Decisions / Blockers / Next moves / Files — written so a FRESH agent could resume | every iteration end |
-| git | One commit per iteration. Pathspec is the run dir only: `git add -- <run-dir>` then commit. Never `git add -A` in a shared repo. Workspace not a repo → `git init` INSIDE the run dir (state-only repo); git unavailable → copy the state FILES (never the checkpoints dir itself) to a SIBLING dir `goal-<slug>-checkpoints/<n>/` instead | every iteration |
+| GATE-RATE | "field X present on >= N% of M rows" | independent re-parse of the artifacts, not the stored flags |
+| COUNT | "exactly K occurrences of Y" | recount with a different method (grep -c vs parser) |
+| SCORE | "honestscore >= T on <artifact>" | the score block, adversarial pass attached |
+| ARTIFACT | "<path> exists, parses, and satisfies <schema>" | validator run + exit code |
+| REGRESSION | "previously passing check <name> still passes" | re-run it this round |
+| PERF | "<metric> <= <bound> measured by <method>" | benchmark output, n >= 3 |
+| SECURITY | "scan X reports no findings of class Y" | scanner output pasted |
+| DOC | "every claim in <doc> cites a source fetched this run" | spot-check 3 random citations |
+| BUDGET | "total cost <= C / total calls <= N" | ledger tally recomputed |
 
-**Boot ritual (start of EVERY iteration, especially after a context reset/compaction):** read `GOAL.md` → `goal-state.json` → tail of `attempts.jsonl` → `git log --oneline -10` → run the Validate command(s). The agent is amnesiac; the filesystem is not.
+Anti-criteria (banned as DoD): "works well", "user satisfied", "production-ready"
+(unmeasurable as written - decompose them or refuse them as DoD).
 
-## 3) The iteration loop
+---
 
-**P0 — CHECK DoD FIRST** (not last): run the Validate commands. If all DoD checks pass → go to P5 (score), then P6 (compound stop). Do not skip the score. Do not declare victory on green checks alone.
+# APPENDIX B - LEDGER OPERATIONS (exact procedures)
 
-**P1 — RECON (first iteration, or when replanning):** fire `skill({id:"deep-thinker"})` — parallel multi-source research on the goal domain. If the goal means adopting external features/patterns, fire `skill({id:"github-feature-mine"})`. Produce a sourced evidence brief before ideating blind.
+## A.1 Append an attempt
 
-**P2 — IDEATE uniquely:** fire `skill({id:"ideas"})`. Diverge N ≥ 5 candidates across ≥2 axes (quick-fix / proper-fix / reframe / inversion / borrow-from-named-reference). Each candidate carries: fingerprint, one falsifiable hypothesis, the cheapest test that could refute it, kill-criterion. Pass every candidate through the Uniqueness Gate (§4). Score in one table (`idea | fixes-what | effort | risk | confidence | kill-criterion`), rank by evidence, shortlist top 1–2.
+Before executing the attempt, append the row with result="pending" and the
+fingerprint. After evidence lands, REWRITE THAT ROW'S result field only via a new
+append (the ledger is append-only; a result correction is a new row referencing the
+old one). Never mutate history - the ledger's value is that it cannot be quietly
+edited after a failure.
 
-**P3 — EXECUTE via crew (§5):** route each disjoint slice to a specialist agent when one matches (§5a), else to `explore`/`general`. Spawn the crew in ONE message per wave. Delegation contracts only: objective + output format + tool guidance + explicit OUT + named deliverable + the JSON final-message contract. Fragments land under `.opencode/runs/<goal-slug>/out/`; orchestrator merges (contracts → implementations → consumers), verifying at every join.
+## A.2 Fingerprint normalization
 
-**P4 — VERIFY externally:** in order (Anthropic grading hierarchy): (1) exec checks — run the Validate/build/test commands, paste real output; (2) de-correlated judge — a FRESH verification subagent that never saw the writing context, read-only, mandated to *refute* ("build the case this fails the spec"), different model family when available — scale to blast radius: trivial iterations may substitute a fresh-context refute-check performed by the orchestrator on the recorded artifact, substantive iterations always get a separate agent; (3) multi-judge consensus on fuzzy criteria — never the generator grading itself (LLM self-preference is measured, arXiv 2404.13076). Trust-but-verify every subagent envelope with side-effect checks.
+Lowercase; strip punctuation; sort multi-part approaches into a canonical order;
+hash the normalized string (any stable hash; 16 hex chars is enough). The test of a
+good fingerprint: two sessions describing the same approach independently must
+produce the same hash. If they would not, the fingerprint is over-fitted to wording
+- loosen the normalization.
 
-**P5 — SCORE:** fire `skill({id:"honestscore"})` on the iteration's artifact. Record the MIN, the per-dimension vector, and the NOT-verified list into `progress.md`.
+## A.3 The uniqueness check (every round)
 
-**P6 — COMPOUND STOP CHECK.** Stop = ALL of: every DoD check passes (exec-verified) · honestscore MIN ≥ `score_target` · verdict ∈ `verdict_allowlist` · all binary must-have gates MET · adversarial pass clean — zero findings, or all findings rebutted/closed within ≤2 rebuttal rounds; survivors of the cap become typed defect tickets reported openly at close. A high score with a "not ready" verdict does NOT stop the loop (ARIS lesson).
+```
+fp = fingerprint(candidate approach)
+matches = ledger rows where fp == candidate.fp AND result in (pass, fail)
+if matches and no new state since those rows:
+    REJECT -> ideas for another approach
+if matches and the prior failure was infra (deadline, provider death, relay):
+    allowed, mark retry-with-cause
+```
 
-**P7 — RECORD + CLOSE iteration:** append the attempt to `attempts.jsonl` (fingerprint, hypothesis, outcome, score delta — every score raise must name the defect it closed); update DoD flags; rewrite `HANDOFF.md`; git commit; re-inject goal from `GOAL.md` (NEVER from a rolling summary — summary-of-summary drift is the top "did something I didn't ask for" cause); loop to P0.
+## A.4 The tally (end of every round)
 
-Loop discipline: every iteration must clear at least one EXTERNAL pass/fail check; an iteration with no external check does not count. Score increases must name the defect closed. Loop `honestscore → ideas → fix → honestscore` inside each iteration until the bar or the 2-round re-verify cap — then next iteration.
+Recompute from the ledger, never from memory: rounds run, DoD criteria with
+evidence (k/j), attempts by outcome, fingerprint collisions (same idea attempted
+twice - should be zero), budget consumed. The tally line goes into the beat and
+into CONTINUE-HERE. A number you cannot recompute from the ledger is not a number.
 
-## 4) Uniqueness Gate (every candidate, every iteration)
+---
 
-1. **Fingerprint** each idea: normalized approach signature = {approach class, target file/component, mechanism verb} — lowercase, whitespace-collapsed, then `sha256` the collapsed string (any deterministic one-liner, e.g. `python -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])" "<signature>"`).
-2. **Ledger consult:** fingerprint matching a prior attempt whose `outcome` was `no-delta` or `rejected` → rejected on sight. A prior attempt that closed a named defect, or that died on a *different* named defect, is not a repeat — the fingerprint for a defect-chase is `{approach class, target, mechanism verb, defect-id}`. Same mechanism plus a new defect-id is a new attempt. Same fingerprint AND same defect-id as a no-delta row is a repeat.
-3. **Semantic repeats count:** "same idea, new words" on the same defect is a repeat — compare mechanism, not phrasing. Hand the candidate + the last 10 ledger entries to the judge with one question: "same mechanism AND same defect as a no-delta row?" Only a yes on both rejects. A yes on mechanism with a different defect-id does not.
-4. **Doom-loop guard:** hash normalized args+result of the iteration's key actions; 3 identical signatures = loop detected → inject a corrective reframe forcing a different approach class.
-5. **Diversity floor:** each iteration must target a different approach class OR a named defect from the previous honestscore output (typed defect tickets drive the next attempt — this is how honestscore and ideas couple). Below diversity threshold → next attempt MUST use an unused approach class.
-6. **Explore→exploit schedule:** while >50% of budget remains, force maximally distinct candidates; inside the last 50%, converge on the best-scoring line (BAVT bandit schedule).
+# APPENDIX C - LONG-HORIZON VARIANT (48 hours to 10 days)
 
-## 5) Crew doctrine (10–30 subagents)
+For multi-day goals the loop adds:
 
-- **Size by genuinely-disjoint scope, then apply the owner floor:** a goal iteration runs a crew of 10–30 subagents ACROSS ITS WAVES (owner floor ≥10 on goal runs; trivial goals fill the 5 role seats — recon, cross-check, build, verify, adversarial; 20+ only for truly independent units). Never pad with duplicate scope — fill seats by ROLE. **Smoke-scale escape:** a trivial single-file/single-check goal may run one orchestrator-executed iteration with no crew — record the reason in the ledger; the 10–30 doctrine applies to real goal runs.
-- **Concurrency per message ≤8** (one wave per message, agents in a wave run concurrently). 10–30 "at once" = one crew, multiple waves back-to-back within the same iteration — not 30 spawns in a single message.
-- **Isolation:** parallel file-writing agents work in separate git worktrees or disjoint file territories; one file cluster = one owner. Artifact pointers (paths) over full-text handoffs; share full traces for decisions, not summaries (Cognition).
-- **Effort-scaling rule in every brief:** "Report blockers in one line; do NOT widen scope. Do NOT spawn grandchildren unless §5a says nested spawn is live for THIS agent. The orchestrator owns merge."
-- **Cap discipline:** ≤2 retries per agent; a silent finisher is chased via session resume; a killed agent's output is never merged. Budget ~10–15% of spawn cap for the verify reserve. Grandchildren, if nested spawn is live, count against the SAME 30-cap — they are not free.
+- C1 MILESTONE SLICES: the DoD decomposes into milestones deliverable in one
+  session; every milestone closes with evidence + CONTINUE-HERE refresh. Never
+  hold a day's work only in chat.
+- C2 BUDGET DECLARATION pre-flight: tokens, cost, tool-calls, wall-clock; circuit
+  breakers armed at 80%. The budget report closes the run.
+- C3 THE DAILY RHYTHM: each working day ends with either a milestone closed or an
+  explicit WIP checkpoint (state + ledger + CONTINUE-HERE). A day that ends with
+  state only in memory is a lost day waiting to happen.
+- C4 CONVERGENCE WATCH: if 3 consecutive milestones each add < 10% toward the
+  goal, the approach is plateauing - invoke ideas for a different frame before
+  burning more rounds.
+- C5 THE UNIQUE-IDEA RULE: across a 10-day run the ledger enforces that iteration
+  7 does not repeat iteration 2. Collisions are visible in the tally; 2 collisions
+  = forced approach change.
 
-## 5a) Specialist routing (custom agents)
+---
 
-OpenCode V2 loads specialists from `.opencode/agents/<id>.md` (project) and `~/.config/opencode/agents/<id>.md` (global). Frontmatter `mode` is `primary` | `subagent` | `all`. A missing `mode` on a new file defaults to **primary** — a goal worker must be `subagent` or `all`, or the spawn is rejected. `description` is what the model sees when picking who to launch; write it as a trigger, not a slogan.
+# APPENDIX D - RESUME PROTOCOL (fresh session / new machine / post-reset)
 
-**Before wave 1 of every iteration:**
+A resumed session runs, in order:
 
-1. List both agent dirs. For each file, read only the frontmatter (`description`, `mode`, `steps`, `model`).
-2. Match a slice to an agent only when the slice's subject is inside that description. No match → `explore` (read) or `general` (write). Never force a specialist onto an adjacent domain.
-3. Spawn with `subagent({ agent: "<id>", ... })`. The child inherits the session model unless its file sets `model`.
-4. One file cluster still has exactly one owner. Two specialists that would edit the same files run in sequence, not parallel.
+1. Read goal-state/GOAL.md (goal, DoD, caps).
+2. Read ledger.jsonl tail: last 5 attempts, their outcomes, open defects.
+3. Read tasklist.md: which rows are delivered / pending.
+4. Read CONTINUE-HERE: the previous session's own next-steps list.
+5. Recompute the DoD tally from evidence files (never from the previous session's
+   claims).
+6. Resume at the first unmet DoD criterion - not from the beginning, not from
+   memory.
 
-**Nested spawn (the "each expert spawns 30") — check, do not assume:**
+The resume test for the state files: a stranger (or a fresh model) can take DONE /
+UNFINISHED / next-steps and continue without asking you anything. If they cannot,
+the state file is the defect - fix it before continuing.
 
-Default `experimental.subagent_depth` is **1**. At 1, a specialist that calls `subagent` gets `Subagent depth limit reached`. Built-in `general` and `explore` cannot launch children even if depth is raised.
+---
 
-Nested fan-out is live only when ALL of these are true, verified this run (read the merged config, do not recall):
+# APPENDIX E - FAILURE MODES OBSERVED IN REAL RUNS (and the countermeasure)
 
-- `experimental.subagent_depth` ≥ 2 (3 if you want grandchildren to spawn too).
-- The specialist's own `permissions` allow `action: subagent` for the grandchild ids it will use.
-- The goal's remaining spawn budget can pay for those grandchildren. They count inside the 30, not beside it.
+- F1 The deadline mirage: the harness's wall-clock killed sessions that completed
+  later; the results table said FAIL while the evidence said PASS. Countermeasure:
+  verdicts come from terminal outcomes + evidence (the ADJ rule), never from the
+  harness's clock alone; timeouts are recorded as timeouts, distinct from quality
+  failures.
+- F2 The stub row: rows with duration 0.0 and fires copied from siblings. They
+  poison both directions (a fake FAIL or a fake PASS). Countermeasure: any row with
+  duration 0.0 or no session id is UNRESOLVED - re-run, never count on trust.
+- F3 The self-acknowledging child: injected corrections get "acknowledged" with no
+  action. Countermeasure: corrections demand execution, not acknowledgment; one
+  re-inject, then absorb.
+- F4 The byte-identical crew: unrelated tasks sharing identical fire lists. A copy-
+  paste signature. Countermeasure: cross-row similarity check before trusting any
+  aggregate.
+- F5 The quiet scope creep: the goal drifted into adjacent work and the ledger
+  never noticed (no fingerprint change, no DoD change). Countermeasure: DoD freeze;
+  drift forces re-declaration.
 
-If any check fails, the specialist does the slice itself and reports the blocker in one line: `nested: off (depth=1)`. Do not tell the operator the tree fanned out.
+## E.1 DO / DON'T (round level)
 
-**Shape that actually scales a C# (or any) build:** one orchestrator session running `/goal`. It spawns the matching specialists (AI / backend / frontend / algorithms / cyber) as **siblings** in waves of ≤8. Each specialist loads only its skills. The orchestrator merges. That is the 10/10 shape on stock OpenCode V2. Raising `subagent_depth` is optional parallelism, not a requirement, and it multiplies tokens (~15× per extra agent layer, Anthropic's measured figure) and duplicate-work failures. Do not raise it inside a goal run — the operator sets it in `opencode.jsonc` on purpose.
+| DO | DON'T |
+|---|---|
+| Close a round with evidence in the ledger | Move on with the result only in chat |
+| Record timeouts as timeouts | Let a harness kill masquerade as quality FAIL |
+| Mark stub rows UNRESOLVED | Merge untrustworthy rows "either way" |
+| Re-run before counting | Count on copied fires |
 
-## 6) Stop conditions (exhaustive — written in the contract, checked in this order)
+---
 
-| # | Condition | Action |
-|---|---|---|
-| 1 | **ACHIEVED** — compound stop (P6) fully green | Close: final report + honest score + evidence; update brain; CONTINUE-HERE |
-| 2 | **BUDGET** — wall-clock or iteration cap hit | Close honestly at current MIN score with open-findings list; never round up |
-| 3 | **NO-PROGRESS** — 2 stalls → forced replan (new approach class + refreshed facts, Magentic-One); 3 stalls → escalate | Escalate with evidence: what was tried (ledger), what is blocked, what the operator must supply |
-| 4 | **BLOCKED** — needs manual input only the operator can supply (credential, login, payment) | Name the ONE item precisely; do every other part first; never invent the input |
-| 5 | **CONTRACT BROKEN** — DoD unsatisfiable as written | Diagnose in ledger; propose rewritten contract as a NEW goal (reset counters, keep ledger) |
+# APPENDIX F - BUDGET DECLARATION TEMPLATE (pre-flight, every goal run)
 
-Escalation is output with partial results — never a silent retry, never a truncate.
+```yaml
+run: <goal-slug>
+declared: <timestamp>
+budget:
+  rounds: <N>              # iteration cap (default: until DoD, hard abort at cap)
+  wall_clock: <e.g. 48h>
+  cost: <currency cap, if provider calls are expected>
+  tool_calls: <cap>
+breakers:
+  - at: 80% of any budget line
+    action: pause, report, require explicit continuation
+  - 2 flat beats (no side-effects) -> stall protocol
+report:
+  end_of_run: true   # budget report is part of DONE, not optional
+```
 
-## 7) Long-run mode (48 hours – 10 days)
+A round that exceeds its declared budget mid-iteration finishes the current slice,
+then stops and reports. Silent overruns are the failure this template exists for.
 
-- **Relauncher (mandatory for multi-day runs — the loop must survive a dead process):** at Phase 0, write `relaunch.ps1` (Windows) or `relaunch.sh` into the run dir. It runs ONE iteration per invocation with a fresh `opencode run`, because the V2 CLI intro (https://opencode.ai/v2/docs/cli/, fetched 2026-10-22) documents `opencode run "<prompt>"` and does **not** document `--continue` / `--session`. Do not pass those flags. The prompt file must name the absolute run dir: "Boot ritual per goal skill §2. Read `<run-dir>/GOAL.md`, `goal-state.json`, the tail of `attempts.jsonl`, and `HANDOFF.md`. Run the Validate command. Do exactly one iteration. Stop."
- - **Status gate, first line of the script:** read `goal-state.json` `status`. If it is anything but `pursuing`, exit 0 and do not call `opencode`. Otherwise a scheduler keeps booting a finished goal until the wall-clock.
- - **Lock:** `run.lock` holds `{pid, startedUtc}`. On start, if the lock exists and that pid is still alive and younger than the wall-clock cap, exit 0 (another iteration is in flight). If the pid is dead, or `startedUtc` is older than the contract's per-iteration budget (default 6h when the contract names none), delete the lock and continue — a crash must not wedge the next fire. Write the lock after that check; delete it in a `finally` / `trap`. Two schedulers never overlap; a dead process costs one iteration, not the run.
- - Schedule with Task Scheduler / cron, or a `while` that also stops when status leaves `pursuing` or the wall-clock in the contract is past. `opencode run --help` on that box is the check — if a continue flag exists there, record it in the ledger, still keep the file boot as the path that works without it.
-- **One iteration ≈ one session/context window.** On compaction or reset, the boot ritual (§2) + `HANDOFF.md` rebuilds full state; full-reset-with-handoff beats summarize-in-place for very long jobs.
-- **Anti-drift:** goal re-injected from the original `GOAL.md` every iteration; never from rolling summaries.
-- **Heartbeat:** any run >5 min gets a ~3-minute pulse verifying real side effects (new files, commit hash, growing counts); two flat beats = stall → recover per §6.3.
-- **Checkpoint every iteration:** git commit + `goal-state.json` write = the resume point. Resume = a fresh `opencode run` whose prompt points at the run dir (see relauncher). The ledger + handoff make any fresh session equivalent. Do not depend on `--continue`.
-- **Test ratchet:** once a DoD check passes, it may never be removed or weakened to keep later iterations green.
+---
 
-## 8) Skill combination map (fire by phase, not all at once)
+# APPENDIX G - MULTI-MACHINE RESUME (the fleet case)
 
-| Phase | Skill(s) | Why |
-|---|---|---|
-| Contract / boot | `godmode` | activation protocol, every session |
-| Recon / research | `deep-thinker`, `deep-research-plus` | multi-source evidence before ideating |
-| External features | `github-feature-mine` | mine proven repo features when the goal adopts patterns |
-| Ideation | `ideas` | N unique candidates, scored, kill-criteria |
-| Execution | `subagents` | crew spawn/merge doctrine (§5) |
-| Specialists | matching agent id from §5a | route the slice; do not invent an agent |
-| Testing/repair | `deep-test-all` + language gate (`dotnet-quality-gate` / `py-quality-gate` / `cpp-quality-gate`) | when the artifact is code |
-| Ship-gate | `web-security-hardening`, `verification-before-completion` | before any deploy claim (user-level skills — loadable via the skill tool even when not in the project skills dir) |
-| Scoring | `honestscore` | the only score the loop trusts |
-| Prompts | `promptgod`, `prompt` | when the goal's artifact is itself a prompt/skill |
+When the goal spans machines (PC + VPS seats):
 
-## Output
+1. The state dir lives with the primary artifact; the ledger is the source of
+   truth, not any one machine's chat.
+2. Every wave that runs remotely writes its results to disk THERE and syncs the
+   evidence back (files, not narration).
+3. Cross-machine steps name their transport in the ledger (ssh/scp/relay) and the
+   exact commands used - the next session re-derives nothing.
+4. If the network path dies mid-run (inter-DC outage class), degrade with the
+   fail-open rule, log the outage, and record which evidence is UNVERIFIED until a
+   relay or retry lands it.
 
-- Per iteration: the unique attempt (fingerprint + hypothesis), crew log, pasted verification evidence, honestscore MIN.
-- On stop: which stop condition fired, the final honest score (MIN/mean/vector), the NOT-verified list, and typed defect tickets for anything open.
-- Final line of the turn, always: `goal — iteration: <n> | status: <pursuing|achieved|budget|no-progress|blocked|contract-broken> | dod: <passed/total> | honestscore: <MIN or in-progress> | unique: <fingerprint ok|rejected dups>`
+---
 
-`gates — godmode:activation: <fired|skipped: why> | /honestscore: <fired N.N|skipped: why> | /ideas: <fired|skipped: why> | brain: <file(s) written|skipped: why>`
+# APPENDIX H - THE ONE-PAGE OPERATING CARD
 
-Read when the phase needs it, not up front:
-- `references/research-catalog.md` — the 20 mined loop skills and the 2026 sources.
-- `references/specialist-agents.md` — where agent files live, why omitted `mode` means primary, the depth-2 switch, the VPS copy path.
+```
+PARSE  goal -> GOAL.md (DoD + falsifiers + caps)  [ask ONE question only if the
+       DONE state is genuinely unobservable]
+BASE   wave 0 recon -> baseline measurement on disk
+LOOP   fingerprint -> tasklist -> launch wave -> merge -> verify -> score ->
+       persist  (repeat)
+STALL  2 flat beats -> classify -> recover -> report pulse
+FAIL   ticket -> ideas (>= 3 distinct) -> fingerprint best -> retry
+ABORT  2 no-progress rounds / cap hit / same blocker twice / missing manual input
+DONE   all DoD falsifiers green + honestscore >= T + evidence persisted +
+       CONTINUE-HERE current
+```
+
+---
+
+# APPENDIX I - SEEN-IN-THE-WILD: TWO ANTI-PATTERNS THIS SKILL REPLACED
+
+## I.1 The vibes loop
+
+Symptom: a run "iterated" 15 times, each iteration re-stating the plan with new
+adjectives; no artifact changed between rounds 3 and 15.
+Cause: no fingerprinting, no falsifiers, honestscore from memory instead of a run.
+Fix: this skill - ledger + fingerprint + per-round evidence. The fingerprint
+collisions in the ledger made the loop visible immediately.
+
+## I.2 The optimistic scoreboard
+
+Symptom: a status table showed 20/20 PASS while the bundle's own independent scan
+showed 3/20. Stored flags had been trusted over fresh computation.
+Fix: every aggregate is recomputed from artifacts by a different method than the
+one that produced it; the independent recompute wins (this is also honestscore's
+E-rule: a check must have been able to come out the other way).
+
+
+
+
+---
+
+# APPENDIX I - FIELD NOTES (real failures that shaped this skill)
+
+## I.1 The stored-flags verdict
+
+One real run declared "20/20 pass" as DoD while its own independent scanner measured
+3/20 against the strict field spec. The stored flags and the strict detector were
+measuring different line formats (a shipped minimum-guard line vs the canonical
+14-field line) - both honest, but never reconciled, so the run "passed" against its
+own stored flags while failing the spec. Fix: DoD criteria name the measurement
+method AND the format it applies to; when two formats exist in the evidence, both
+rates are reported, never just the flattering one.
+
+An honest goal report shows the strict number next to the shipped-format number and
+says which rule produced which. Anything else is the proxy-metric failure: ranking
+your own evidence by the version of the metric that passes.

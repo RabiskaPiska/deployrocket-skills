@@ -1,38 +1,61 @@
 ---
-id: skill-anti-overclaim-upgrade
-name: Anti-Overclaim Upgrade — 60-Phrase Blocker
-version: 1.0
-description: Detects overclaiming language before done-claims are allowed. 60 blocked phrases in 3 categories. Claim gate #2. Fires after skill-ground-truth-harness, before skill-paperclip-ledger-guard.
-spec_hash: v66-godmode-build-2026-11-08
-position_in_chain: Gate 2 of 4
+name: skill-anti-overclaim-upgrade
+description: Detects overclaiming language before done-claims are allowed. 60 blocked phrases in 3 categories, formal detection algorithm with question-form and context-window exclusions, PASS/BLOCK output formats, PASS-WITH-NOTE tie-break, and self-test suite. Claim gate #2 of 4 - fires after skill-ground-truth-harness, before skill-paperclip-ledger-guard. Supersedes the base anti-overclaim phrase scan for gate ordering; the alias twin anti-overclaim remains active as the base layer (gate #4) - either id fires the same stack.
+alwaysFire: true
 ---
 
-## SECTION 1 — WHEN TO FIRE
+# Anti-Overclaim Upgrade - 60-Phrase Blocker
 
-Fire on EVERY response that contains a done-claim, fixed-claim, shipped-claim, or deployed-claim.
+## SUPERSESSION AND ALIAS MAP
 
-A **"done-claim context"** means: the phrase appears near (within ~100 characters of) any of these context words:
+This skill is the LEAD in the overclaim-detection pair. Relationship to the
+other skills, fixed here so no session has to re-derive it:
 
-> done, ship, deploy, finish, complete, fixed, working, pass, verified, confirmed, live, active
+- `skill-anti-overclaim-upgrade` (THIS SKILL) - Gate 2. Mechanical 60-phrase
+  detection with the context-window and question-form rules. The lead.
+- `anti-overclaim` - the base layer, Gate 4. Its evidence-format rules (E1-E5)
+  remain authoritative for what counts as evidence; its phrase table is
+  superseded by this skill's 60-phrase list for DETECTION purposes. The alias
+  map may fire either id; both route into the same four-gate chain, so firing
+  either is correct and complete.
+- Order: skill-ground-truth-harness (Gate 1) -> THIS (Gate 2) ->
+  skill-paperclip-ledger-guard (Gate 3) -> anti-overclaim base (Gate 4).
+
+Consequence: adding new blocked phrases happens HERE. The base skill's phrase
+list is frozen reference material, not the live detector.
+
+## SECTION 1 - WHEN TO FIRE
+
+Fire on EVERY response that contains a done-claim, fixed-claim, shipped-claim,
+or deployed-claim.
+
+A **done-claim context** means: the phrase appears near (within ~100 characters
+of) any of these context words:
+
+> done, ship, deploy, finish, complete, fixed, working, pass, verified,
+> confirmed, live, active
 
 **Fire on** assertions like:
+
 - "The deployment is complete."
 - "This should work now."
 - "I've set it up and it's running."
 - "Everything looks correct."
 
 **Do NOT fire on:**
-- Questions: "Does this look correct?" → NOT blocked
-- Hypotheticals: "In theory, this would work if the config is correct." → NOT blocked
-- Descriptions of requirements: "The function should work by calling X." → NOT blocked (describing intent, not asserting result)
 
-If the blocked phrase appears inside a sentence ending in `?`, skip the block entirely.
+- Questions: "Does this look correct?" - NOT blocked
+- Hypotheticals: "In theory, this would work if the config is correct." -
+  NOT blocked
+- Descriptions of requirements: "The function should work by calling X." -
+  NOT blocked (describing intent, not asserting a result)
 
----
+If the blocked phrase appears inside a sentence ending in `?`, skip the block
+entirely.
 
-## SECTION 2 — THE 60-PHRASE LIST
+## SECTION 2 - THE 60-PHRASE LIST
 
-### Category A — Soft Done-Claims (25 phrases)
+### Category A - Soft Done-Claims (25 phrases)
 
 These assert completion without attaching any evidence:
 
@@ -62,7 +85,7 @@ These assert completion without attaching any evidence:
 24. `running`
 25. `operational`
 
-### Category B — Confidence Overclaims (20 phrases)
+### Category B - Confidence Overclaims (20 phrases)
 
 These assert certainty or near-certainty without proof:
 
@@ -87,7 +110,7 @@ These assert certainty or near-certainty without proof:
 19. `this will work`
 20. `no issues`
 
-### Category C — Untestable Claims (15 phrases)
+### Category C - Untestable Claims (15 phrases)
 
 These make assertions while explicitly or implicitly blocking verification:
 
@@ -107,13 +130,35 @@ These make assertions while explicitly or implicitly blocking verification:
 14. `no way this fails`
 15. `this is definitely right`
 
-**Total phrase count: 25 + 20 + 15 = 60**
+**Total phrase count: 25 + 20 + 15 = 60** (count is load-bearing: the self-test
+in SECTION 9 asserts it).
 
----
+## SECTION 2A - WHY EACH CATEGORY EXISTS
 
-## SECTION 3 — DETECTION ALGORITHM
+- Category A phrases are legitimate words that become overclaims when used as
+  the SOLE support for a completion assertion. The phrase list is intentionally
+  broad; the context-window rule is what makes it precise.
+- Category B phrases smuggle in an unstated probability ("should", "looks",
+  "probably"). The replacement is always a measurement or "untested".
+- Category C phrases are the most dangerous: they PRE-EMPT verification. Any
+  sentence that argues checking is unnecessary is itself the violation.
 
-The following pseudocode defines the detection logic. All matching is case-insensitive. Phrase matching uses substring search (not word-boundary) to catch embedded uses like "it's completed" matching `completed`.
+Historical anchors (each rule below is the scar of a real failure):
+
+- "A self-score of 7.7 against blind adversarial passes of 6.0/3.5/5.0" - the
+  self scored its own prose; the phrase "looks correct" survived six read-
+  throughs and zero commands. Category B exists because re-reading is not
+  checking.
+- A fix once INTRODUCED the exact defect it guarded against. "Fixed" plus
+  "should work" is the sound of that failure. Categories A and B both apply.
+- "Could not measure" written as if it were a pass result. Category C exists
+  to make that sentence impossible to emit.
+
+## SECTION 3 - DETECTION ALGORITHM
+
+All matching is case-insensitive. Phrase matching uses substring search (not
+word-boundary) to catch embedded uses like "it's completed" matching
+`completed`.
 
 ```python
 CAT_A = [
@@ -149,19 +194,16 @@ DONE_CONTEXT_WORDS = [
 
 def is_question_sentence(text: str, phrase_idx: int) -> bool:
     """Return True if the sentence containing phrase_idx ends with '?'."""
-    # Find sentence boundaries around the index
     start = text.rfind('.', 0, phrase_idx)
     start = max(start, text.rfind('!', 0, phrase_idx))
     start = max(start, text.rfind('\n', 0, phrase_idx))
     end = text.find('.', phrase_idx)
     end_q = text.find('?', phrase_idx)
     end_e = text.find('!', phrase_idx)
-    # Find earliest sentence terminator after phrase
     terminators = [x for x in [end, end_q, end_e] if x != -1]
     if not terminators:
         return False
     nearest_end = min(terminators)
-    # If the nearest terminator is '?', it's a question — skip block
     return text[nearest_end] == '?'
 
 
@@ -173,14 +215,13 @@ def check_overclaim(response_text: str) -> dict:
             phrase_lower = phrase.lower()
             idx = response_lower.find(phrase_lower)
             while idx != -1:
-                # Check question-form exclusion
                 if is_question_sentence(response_lower, idx):
                     idx = response_lower.find(phrase_lower, idx + 1)
                     continue
 
-                # Check done-claim context window (100 chars either side)
                 window_start = max(0, idx - 100)
-                window_end = min(len(response_lower), idx + len(phrase_lower) + 100)
+                window_end = min(len(response_lower),
+                                 idx + len(phrase_lower) + 100)
                 surrounding = response_lower[window_start:window_end]
 
                 if any(word in surrounding for word in DONE_CONTEXT_WORDS):
@@ -200,100 +241,115 @@ def check_overclaim(response_text: str) -> dict:
 
 | Situation | Behaviour |
 |---|---|
-| Phrase inside a `?` sentence | Skip — not a done-claim |
-| Phrase in code block (backtick fenced) | Still matched — agent may be describing its own output |
-| Multiple triggers in one response | Report the **first** hit; block immediately; do not scan further |
-| Phrase appears in a quoted user message | Still matched — agent quoted it approvingly |
-| Hypothetical with explicit "in theory" prefix AND no context word nearby | Skipped by context-window check |
+| Phrase inside a `?` sentence | Skip - not a done-claim |
+| Phrase in a backtick-fenced code block | Still matched - the agent may be describing its own output |
+| Multiple triggers in one response | Report the FIRST hit; block immediately; do not scan further |
+| Phrase in a quoted user message | Still matched - the agent quoted it approvingly |
+| Hypothetical with explicit "in theory" prefix AND no context word nearby | Skipped by the context-window check |
+| Phrase inside a URL or file path | Still matched; rephrase paths in prose, not fence the claim |
+| Phrase inside the evidence output being quoted | PASS-WITH-NOTE rule (Section 8, Example 6) |
 
----
+## SECTION 3 - FALSE-POSITIVE CONTROLS
 
-## SECTION 4 — BLOCK OUTPUT FORMAT
+The blocker's failure mode is nagging: if it blocks honest reporting often
+enough, agents start avoiding the word "done" instead of attaching evidence,
+which is worse. Controls, in force:
 
-When a phrase triggers a block, output exactly this structure (fill in the bracketed fields):
+1. Question-form exclusion (sentences ending in `?` are never claims).
+2. Context-window requirement: no block without a done-context word nearby.
+3. Hypothetical carve-out: "in theory" + no context word = no block.
+4. Requirement-description carve-out: "should work by calling X" describes
+   intent; the context-window rule is what saves it - verify the window
+   before firing.
+5. Evidence co-presence: if real pasted output sits in the same response,
+   the PASS-WITH-NOTE tie-break applies (Section 8) rather than a hard block.
+
+When a false positive DOES occur: it is fixed by refining the CONTEXT WINDOW
+or adding an exclusion, never by deleting the phrase. Deleted phrases are how
+the gate goes quietly blind.
+
+## SECTION 4 - BLOCK OUTPUT FORMAT
+
+When a phrase triggers a block, output exactly this structure (fill in the
+bracketed fields; ASCII only - no box-drawing characters, they break some
+terminals and fail ASCII gates):
 
 ```
-╔══════════════════════════════════════════════════════════════╗
-║           ANTI-OVERCLAIM BLOCK DETECTED (Gate #2)           ║
-╚══════════════════════════════════════════════════════════════╝
+==========================================================
+  ANTI-OVERCLAIM BLOCK DETECTED (Gate #2)
+============================================================
 
 Phrase   : "[exact phrase found]"
-Category : [A — Soft Done-Claim | B — Confidence Overclaim | C — Untestable Claim]
-Found in : "[quote the surrounding 1–2 sentences verbatim]"
+Category : [A - Soft Done-Claim | B - Confidence Overclaim | C - Untestable Claim]
+Found in : "[quote the surrounding 1-2 sentences verbatim]"
 
-──────────────────────────────────────────────────────────────
+------------------------------------------------------------
  Execution is PAUSED. Provide ONE of the following to continue:
-──────────────────────────────────────────────────────────────
+------------------------------------------------------------
 
   (a) Command output pasted directly
-      → paste the raw terminal/tool result, not a description of it
+      -> paste the raw terminal/tool result, not a description of it
 
   (b) File read-back showing expected content
-      → paste the actual file contents as returned by the Read tool,
+      -> paste the actual file contents as returned by the Read tool,
         not "I saved it" or "it should contain"
 
   (c) Test run output showing pass/fail
-      → paste the full test runner output including exit code
+      -> paste the full test runner output including exit code
 
   (d) Explicit "untested" acknowledgment:
-      → "untested — exact command to verify: [command the user can run]"
+      -> "untested - exact command to verify: [command the user can run]"
 
-──────────────────────────────────────────────────────────────
- Gate 2 status: BLOCKED — skill-paperclip-ledger-guard will NOT
+------------------------------------------------------------
+ Gate 2 status: BLOCKED - skill-paperclip-ledger-guard will NOT
  receive this response until evidence is provided and re-scan passes.
-──────────────────────────────────────────────────────────────
+------------------------------------------------------------
 ```
 
-**After evidence is provided**, re-run `check_overclaim()` on the revised response. If the revised response no longer contains a blocked phrase in a done-claim context, issue the PASS output (Section 5) and forward to Gate 3.
+**After evidence is provided**, re-run `check_overclaim()` on the revised
+response. If the revised response no longer contains a blocked phrase in a
+done-claim context, issue the PASS output (Section 4) and forward to Gate 3.
 
----
+## SECTION 3 - PASS OUTPUT FORMAT
 
-## SECTION 5 — PASS OUTPUT FORMAT
-
-When no blocked phrase is found in a done-claim context (or after evidence resolves a prior block):
+When no blocked phrase is found in a done-claim context (or after evidence
+resolves a prior block):
 
 ```
-╔══════════════════════════════════════════════════════════════╗
-║           ANTI-OVERCLAIM: PASS (Gate #2)                    ║
-╚══════════════════════════════════════════════════════════════╝
+============================================================
+  ANTI-OVERCLAIM: PASS (Gate #2)
+============================================================
 No blocked phrases detected in done-claim context.
 Forwarding to Gate 3: skill-paperclip-ledger-guard
 ```
 
----
-
-## SECTION 6 — INTEGRATION CHAIN
-
-This skill occupies **Gate 2** in the four-gate claim-verification chain:
+PASS-WITH-NOTE (evidence pasted, phrase used descriptively alongside it):
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Response containing a done / fixed / shipped / deployed claim  │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                     ┌─────▼──────┐
-              Gate 1 │ skill-     │  Provides tool output / evidence.
-                     │ ground-    │  Requires at least one verifiable
-                     │ truth-     │  side-effect before passing on.
-                     │ harness    │
-                     └─────┬──────┘
-                           │  evidence bundle
-                     ┌─────▼──────────────────────────┐
-              Gate 2 │ skill-anti-overclaim-upgrade   │  ← THIS SKILL
-                     │ (60-phrase blocker)            │  Scans response text.
-                     │                                │  BLOCK → pause + request
-                     │                                │  evidence, then re-scan.
-                     └─────┬──────────────────────────┘
-                           │  PASS
-                     ┌─────▼──────────────────────┐
-              Gate 3 │ skill-paperclip-ledger-    │  HMAC bundle sign-off.
-                     │ guard                       │  Checks ledger integrity.
-                     └─────┬──────────────────────┘
-                           │
-                     ┌─────▼──────────────────┐
-              Gate 4 │ anti-overclaim          │  Base layer final check.
-                     │ (base layer)            │
-                     └─────────────────────────┘
+ANTI-OVERCLAIM: PASS-WITH-NOTE - phrase "[phrase]" (Cat-A) present but
+accompanied by pasted tool output (evidence accepted by context).
+Forwarding to Gate 3: skill-paperclip-ledger-guard
+```
+
+## SECTION 4 - INTEGRATION CHAIN
+
+This skill occupies Gate 2 in the four-gate claim-verification chain:
+
+```
+Response containing a done / fixed / shipped / deployed claim
+        |
+  [Gate 1] skill-ground-truth-harness
+        |    Provides tool output / evidence.
+        |    Requires at least one verifiable side-effect before passing on.
+        |
+  [Gate 2] skill-anti-overclaim-upgrade    <-- THIS SKILL
+        |    Scans response text. BLOCK -> pause + request evidence,
+        |    then re-scan.
+        |
+  [Gate 3] skill-paperclip-ledger-guard
+        |    HMAC bundle sign-off. Checks ledger integrity.
+        |
+  [Gate 4] anti-overclaim (base layer)     Final check / evidence block.
 ```
 
 **Data flow:**
@@ -301,48 +357,51 @@ This skill occupies **Gate 2** in the four-gate claim-verification chain:
 | Step | Actor | Input | Output |
 |---|---|---|---|
 | 1 | skill-ground-truth-harness | raw response | response + evidence bundle |
-| 2 | **THIS SKILL** | response + evidence bundle | PASS or BLOCK result |
+| 2 | THIS SKILL | response + evidence bundle | PASS or BLOCK result |
 | 3 | skill-paperclip-ledger-guard | PASS result + evidence bundle | HMAC-signed bundle |
 | 4 | anti-overclaim (base) | signed bundle | final PASS / FAIL |
 
-**On BLOCK:** execution stops at Gate 2. The response is returned to the agent with the BLOCK output format (Section 4). The agent must supply evidence. After evidence is attached, `check_overclaim()` is re-run on the updated response text. Only a clean re-scan advances to Gate 3.
+**On BLOCK:** execution stops at Gate 2. The response returns to the agent
+with the BLOCK output (Section 4 above). The agent supplies evidence. After
+evidence is attached, `check_overclaim()` re-runs on the updated text. Only a
+clean re-scan advances to Gate 3.
 
-**Gate 2 never modifies the response content.** It only inspects and routes.
+**Gate 2 never modifies response content.** It inspects and routes only.
 
----
-
-## SECTION 7 — GATE LINE CONTRIBUTION
+## SECTION 5 - GATE LINE CONTRIBUTION
 
 Every turn that passes Gate 2 appends to the claim-gates line:
 
 **On PASS:**
+
 ```
 claim-gates: ... | anti-overclaim-upgrade=PASS
 ```
 
 **On BLOCK (before resolution):**
+
 ```
 claim-gates: ... | anti-overclaim-upgrade=BLOCK:["phrase" Category A]
 ```
 
 **On BLOCK resolved to PASS (evidence provided, re-scan clean):**
+
 ```
 claim-gates: ... | anti-overclaim-upgrade=PASS(was-BLOCK:["phrase" Cat-A, resolved)
 ```
 
-The full gate line format across all four gates looks like:
+The full gate line across all four gates:
 
 ```
-claim-gates: ground-truth-harness=PASS | anti-overclaim-upgrade=PASS | paperclip-ledger-guard=PASS | anti-overclaim=PASS
+claim-gates: ground-truth-harness=PASS | anti-overclaim-upgrade=PASS | paperclip-ledger-guard=SIGNED:bundle-verified | anti-overclaim=PASS
 ```
 
----
+## SECTION 6 - EXAMPLES
 
-## SECTION 8 — EXAMPLES
-
-### Example 1 — PASS (evidence provided alongside claim)
+### Example 1 - PASS (evidence provided alongside claim)
 
 **Input response:**
+
 ```
 The migration script ran successfully. Here is the output:
   $ python migrate.py
@@ -350,111 +409,98 @@ The migration script ran successfully. Here is the output:
   All migrations applied. Exit 0.
 ```
 
-**Gate 2 result:**
-- Phrase `successfully` → not in the 60-phrase list (not a hit).
-- Phrase `OK` → not in the 60-phrase list.
-- Context words present (`applied`) but no blocked phrase triggers.
+**Gate 2 result:** `successfully` and `OK` are not in the 60-phrase list.
+Context word `applied` present but no blocked phrase triggers.
 
 ```
-ANTI-OVERCLAIM: PASS — no blocked phrases detected in done-claim context
+ANTI-OVERCLAIM: PASS - no blocked phrases detected in done-claim context
 ```
 
----
-
-### Example 2 — BLOCK (Category A, bare done-claim)
+### Example 2 - BLOCK (Category A, bare done-claim)
 
 **Input response:**
+
 ```
 The deployment is complete.
 ```
 
-**Gate 2 result:**
-- Phrase: `complete` (Category A)
-- Context word nearby: `deployment` (matches `deploy` context word)
-- Not a question sentence.
+**Gate 2 result:** phrase `complete` (Category A); context word `deployment`
+matches `deploy`; not a question sentence.
 
 ```
 ANTI-OVERCLAIM BLOCK DETECTED (Gate #2)
 
-Phrase   : "complete" (Category A — Soft Done-Claim)
+Phrase   : "complete" (Category A - Soft Done-Claim)
 Found in : "The deployment is complete."
 
 Execution is PAUSED. Provide ONE of:
   (a) Command output pasted directly
   (b) File read-back
   (c) Test run output with exit code
-  (d) "untested — exact command to verify: [command]"
+  (d) "untested - exact command to verify: [command]"
 ```
 
----
-
-### Example 3 — BLOCK (Category B, confidence overclaim)
+### Example 3 - BLOCK (Category B, confidence overclaim)
 
 **Input response:**
+
 ```
 This should work now that the config has been updated.
 ```
 
-**Gate 2 result:**
-- Phrase: `should work` (Category B)
-- Context word nearby: `config` → `configured` (matches context)
-- Not a question sentence.
+**Gate 2 result:** phrase `should work` (Category B); context word
+`config`/`updated` in window; not a question.
 
 ```
 ANTI-OVERCLAIM BLOCK DETECTED (Gate #2)
 
-Phrase   : "should work" (Category B — Confidence Overclaim)
+Phrase   : "should work" (Category B - Confidence Overclaim)
 Found in : "This should work now that the config has been updated."
 
 Execution is PAUSED. Provide evidence.
 ```
 
----
-
-### Example 4 — PASS (question form exclusion)
+### Example 4 - PASS (question-form exclusion)
 
 **Input response:**
+
 ```
 Does this look correct to you?
 ```
 
-**Gate 2 result:**
-- Phrase: `looks correct` → not found (phrase is `looks correct`, text has `look correct` — no match).
-- Even if it were `looks correct`, the sentence ends in `?` → question-form exclusion applies.
+**Gate 2 result:** `looks correct` not found (text has `look correct` - no
+substring match); and the sentence ends in `?`, so the question-form
+exclusion would apply regardless.
 
 ```
-ANTI-OVERCLAIM: PASS — no blocked phrases detected in done-claim context
+ANTI-OVERCLAIM: PASS - no blocked phrases detected in done-claim context
 ```
 
----
-
-### Example 5 — BLOCK (Category C, untestable claim)
+### Example 5 - BLOCK (Category C, untestable claim)
 
 **Input response:**
+
 ```
 I cannot test but the logic is clearly sound and the function is verified.
 ```
 
-**Gate 2 result:**
-- Phrase: `cannot test but` (Category C) — first hit.
-- Context word nearby: `verified` (matches `verified` context word).
-- Not a question sentence.
+**Gate 2 result:** first hit `cannot test but` (Category C); context word
+`verified` nearby; not a question.
 
 ```
 ANTI-OVERCLAIM BLOCK DETECTED (Gate #2)
 
-Phrase   : "cannot test but" (Category C — Untestable Claim)
+Phrase   : "cannot test but" (Category C - Untestable Claim)
 Found in : "I cannot test but the logic is clearly sound and the function is verified."
 
 Execution is PAUSED. Provide evidence or state:
-  "untested — exact command to verify: [command]"
+  "untested - exact command to verify: [command]"
 ```
 
----
+### Example 6 - PASS-WITH-NOTE (evidence resolves the block)
 
-### Example 6 — PASS (evidence resolves earlier block)
+**Agent's revised response after the block in Example 2:**
 
-**Agent's revised response after block in Example 2:**
 ```
 Deployment output:
   $ kubectl rollout status deployment/api
@@ -463,1150 +509,299 @@ Deployment output:
 The rollout finished without errors (exit 0 above).
 ```
 
-**Gate 2 re-scan result:**
-- `successfully` → not in phrase list.
-- `finished` → Category A, BUT context window check: surrounding text contains `Exit 0` and tool output — however, `finished` IS in context. Wait — does it still block?
-  - Surrounding text also includes the pasted command output. The re-scan checks for blocked phrases in the **response text**. `finished` matches Category A. But the agent provided evidence (pasted tool output). The rule is to re-scan the **updated** response — the word `finished` is still present.
-  - Correct behaviour: the re-scan still fires on `finished`. The agent must rephrase to avoid bare done-claim words **or** the gates must accept that pasted evidence satisfies the intent.
-  - **Tie-break rule:** if evidence is pasted AND the phrase is used descriptively alongside the evidence (not as the sole claim), Gate 2 notes the phrase but marks it PASS-WITH-NOTE, forwarding to Gate 3 with a flag.
+**Gate 2 re-scan:** `finished` (Category A) is still present, but it is used
+descriptively alongside pasted tool output. Tie-break rule applies:
+
+- If evidence is pasted AND the phrase is used descriptively alongside the
+  evidence (not as the sole claim), Gate 2 notes the phrase but marks it
+  PASS-WITH-NOTE, forwarding to Gate 3 with a flag.
 
 ```
-ANTI-OVERCLAIM: PASS-WITH-NOTE — phrase "finished" (Cat-A) present but
+ANTI-OVERCLAIM: PASS-WITH-NOTE - phrase "finished" (Cat-A) present but
 accompanied by pasted tool output (evidence accepted by context).
 Forwarding to Gate 3: skill-paperclip-ledger-guard
 claim-gates: ... | anti-overclaim-upgrade=PASS(was-BLOCK:"complete" Cat-A, resolved)
 ```
 
----
+## SECTION 7 - RESOLUTION LIFECYCLE (state machine)
 
-## APPENDIX — QUICK REFERENCE CARD
+A blocked claim moves through exactly these states - nothing skipped, nothing
+repeated:
 
 ```
-╔═══════════════════════════════════════════════════════╗
-║  Anti-Overclaim Upgrade v1.0 — Quick Reference       ║
-╠═══════════════════════════════════════════════════════╣
-║  Gate position : #2 of 4                             ║
-║  Fires on      : done/fixed/shipped/deployed claims  ║
-║  Skips on      : questions, hypotheticals            ║
-║  Phrase list   : 60 total (25 Cat-A / 20 B / 15 C)  ║
-╠═══════════════════════════════════════════════════════╣
-║  On BLOCK: paste (a) cmd output, (b) file read-back, ║
-║            (c) test output, or (d) "untested — cmd"  ║
-╠═══════════════════════════════════════════════════════╣
-║  Gate line: anti-overclaim-upgrade=PASS              ║
-║          or anti-overclaim-upgrade=BLOCK:["phrase"]  ║
-╚═══════════════════════════════════════════════════════╝
+SCAN -> HIT? -> BLOCK(response returned to agent)
+                  |
+                  v
+            EVIDENCE PROVIDED (a/b/c/d from Section 4)
+                  |
+                  v
+            RE-SCAN(updated response text)
+                  |
+        +---------+----------+
+        |                    |
+      clean               still dirty
+        |                    |
+        v                    v
+  PASS-WITH-NOTE        BLOCK again (same phrase, now WITH
+        |               evidence attached -> PASS-WITH-NOTE if
+        v               evidence is real; else remain BLOCKED)
+  Gate 3
 ```
 
-<!-- auto-padded by auto-updater -->
-<!-- padding line 1 -->
-<!-- padding line 2 -->
-<!-- padding line 3 -->
-<!-- padding line 4 -->
-<!-- padding line 5 -->
-<!-- padding line 6 -->
-<!-- padding line 7 -->
-<!-- padding line 8 -->
-<!-- padding line 9 -->
-<!-- padding line 10 -->
-<!-- padding line 11 -->
-<!-- padding line 12 -->
-<!-- padding line 13 -->
-<!-- padding line 14 -->
-<!-- padding line 15 -->
-<!-- padding line 16 -->
-<!-- padding line 17 -->
-<!-- padding line 18 -->
-<!-- padding line 19 -->
-<!-- padding line 20 -->
-<!-- padding line 21 -->
-<!-- padding line 22 -->
-<!-- padding line 23 -->
-<!-- padding line 24 -->
-<!-- padding line 25 -->
-<!-- padding line 26 -->
-<!-- padding line 27 -->
-<!-- padding line 28 -->
-<!-- padding line 29 -->
-<!-- padding line 30 -->
-<!-- padding line 31 -->
-<!-- padding line 32 -->
-<!-- padding line 33 -->
-<!-- padding line 34 -->
-<!-- padding line 35 -->
-<!-- padding line 36 -->
-<!-- padding line 37 -->
-<!-- padding line 38 -->
-<!-- padding line 39 -->
-<!-- padding line 40 -->
-<!-- padding line 41 -->
-<!-- padding line 42 -->
-<!-- padding line 43 -->
-<!-- padding line 44 -->
-<!-- padding line 45 -->
-<!-- padding line 46 -->
-<!-- padding line 47 -->
-<!-- padding line 48 -->
-<!-- padding line 49 -->
-<!-- padding line 50 -->
-<!-- padding line 51 -->
-<!-- padding line 52 -->
-<!-- padding line 53 -->
-<!-- padding line 54 -->
-<!-- padding line 55 -->
-<!-- padding line 56 -->
-<!-- padding line 57 -->
-<!-- padding line 58 -->
-<!-- padding line 59 -->
-<!-- padding line 60 -->
-<!-- padding line 61 -->
-<!-- padding line 62 -->
-<!-- padding line 63 -->
-<!-- padding line 64 -->
-<!-- padding line 65 -->
-<!-- padding line 66 -->
-<!-- padding line 67 -->
-<!-- padding line 68 -->
-<!-- padding line 69 -->
-<!-- padding line 70 -->
-<!-- padding line 71 -->
-<!-- padding line 72 -->
-<!-- padding line 73 -->
-<!-- padding line 74 -->
-<!-- padding line 75 -->
-<!-- padding line 76 -->
-<!-- padding line 77 -->
-<!-- padding line 78 -->
-<!-- padding line 79 -->
-<!-- padding line 80 -->
-<!-- padding line 81 -->
-<!-- padding line 82 -->
-<!-- padding line 83 -->
-<!-- padding line 84 -->
-<!-- padding line 85 -->
-<!-- padding line 86 -->
-<!-- padding line 87 -->
-<!-- padding line 88 -->
-<!-- padding line 89 -->
-<!-- padding line 90 -->
-<!-- padding line 91 -->
-<!-- padding line 92 -->
-<!-- padding line 93 -->
-<!-- padding line 94 -->
-<!-- padding line 95 -->
-<!-- padding line 96 -->
-<!-- padding line 97 -->
-<!-- padding line 98 -->
-<!-- padding line 99 -->
-<!-- padding line 100 -->
-<!-- padding line 101 -->
-<!-- padding line 102 -->
-<!-- padding line 103 -->
-<!-- padding line 104 -->
-<!-- padding line 105 -->
-<!-- padding line 106 -->
-<!-- padding line 107 -->
-<!-- padding line 108 -->
-<!-- padding line 109 -->
-<!-- padding line 110 -->
-<!-- padding line 111 -->
-<!-- padding line 112 -->
-<!-- padding line 113 -->
-<!-- padding line 114 -->
-<!-- padding line 115 -->
-<!-- padding line 116 -->
-<!-- padding line 117 -->
-<!-- padding line 118 -->
-<!-- padding line 119 -->
-<!-- padding line 120 -->
-<!-- padding line 121 -->
-<!-- padding line 122 -->
-<!-- padding line 123 -->
-<!-- padding line 124 -->
-<!-- padding line 125 -->
-<!-- padding line 126 -->
-<!-- padding line 127 -->
-<!-- padding line 128 -->
-<!-- padding line 129 -->
-<!-- padding line 130 -->
-<!-- padding line 131 -->
-<!-- padding line 132 -->
-<!-- padding line 133 -->
-<!-- padding line 134 -->
-<!-- padding line 135 -->
-<!-- padding line 136 -->
-<!-- padding line 137 -->
-<!-- padding line 138 -->
-<!-- padding line 139 -->
-<!-- padding line 140 -->
-<!-- padding line 141 -->
-<!-- padding line 142 -->
-<!-- padding line 143 -->
-<!-- padding line 144 -->
-<!-- padding line 145 -->
-<!-- padding line 146 -->
-<!-- padding line 147 -->
-<!-- padding line 148 -->
-<!-- padding line 149 -->
-<!-- padding line 150 -->
-<!-- padding line 151 -->
-<!-- padding line 152 -->
-<!-- padding line 153 -->
-<!-- padding line 154 -->
-<!-- padding line 155 -->
-<!-- padding line 156 -->
-<!-- padding line 157 -->
-<!-- padding line 158 -->
-<!-- padding line 159 -->
-<!-- padding line 160 -->
-<!-- padding line 161 -->
-<!-- padding line 162 -->
-<!-- padding line 163 -->
-<!-- padding line 164 -->
-<!-- padding line 165 -->
-<!-- padding line 166 -->
-<!-- padding line 167 -->
-<!-- padding line 168 -->
-<!-- padding line 169 -->
-<!-- padding line 170 -->
-<!-- padding line 171 -->
-<!-- padding line 172 -->
-<!-- padding line 173 -->
-<!-- padding line 174 -->
-<!-- padding line 175 -->
-<!-- padding line 176 -->
-<!-- padding line 177 -->
-<!-- padding line 178 -->
-<!-- padding line 179 -->
-<!-- padding line 180 -->
-<!-- padding line 181 -->
-<!-- padding line 182 -->
-<!-- padding line 183 -->
-<!-- padding line 184 -->
-<!-- padding line 185 -->
-<!-- padding line 186 -->
-<!-- padding line 187 -->
-<!-- padding line 188 -->
-<!-- padding line 189 -->
-<!-- padding line 190 -->
-<!-- padding line 191 -->
-<!-- padding line 192 -->
-<!-- padding line 193 -->
-<!-- padding line 194 -->
-<!-- padding line 195 -->
-<!-- padding line 196 -->
-<!-- padding line 197 -->
-<!-- padding line 198 -->
-<!-- padding line 199 -->
-<!-- padding line 200 -->
-<!-- padding line 201 -->
-<!-- padding line 202 -->
-<!-- padding line 203 -->
-<!-- padding line 204 -->
-<!-- padding line 205 -->
-<!-- padding line 206 -->
-<!-- padding line 207 -->
-<!-- padding line 208 -->
-<!-- padding line 209 -->
-<!-- padding line 210 -->
-<!-- padding line 211 -->
-<!-- padding line 212 -->
-<!-- padding line 213 -->
-<!-- padding line 214 -->
-<!-- padding line 215 -->
-<!-- padding line 216 -->
-<!-- padding line 217 -->
-<!-- padding line 218 -->
-<!-- padding line 219 -->
-<!-- padding line 220 -->
-<!-- padding line 221 -->
-<!-- padding line 222 -->
-<!-- padding line 223 -->
-<!-- padding line 224 -->
-<!-- padding line 225 -->
-<!-- padding line 226 -->
-<!-- padding line 227 -->
-<!-- padding line 228 -->
-<!-- padding line 229 -->
-<!-- padding line 230 -->
-<!-- padding line 231 -->
-<!-- padding line 232 -->
-<!-- padding line 233 -->
-<!-- padding line 234 -->
-<!-- padding line 235 -->
-<!-- padding line 236 -->
-<!-- padding line 237 -->
-<!-- padding line 238 -->
-<!-- padding line 239 -->
-<!-- padding line 240 -->
-<!-- padding line 241 -->
-<!-- padding line 242 -->
-<!-- padding line 243 -->
-<!-- padding line 244 -->
-<!-- padding line 245 -->
-<!-- padding line 246 -->
-<!-- padding line 247 -->
-<!-- padding line 248 -->
-<!-- padding line 249 -->
-<!-- padding line 250 -->
-<!-- padding line 251 -->
-<!-- padding line 252 -->
-<!-- padding line 253 -->
-<!-- padding line 254 -->
-<!-- padding line 255 -->
-<!-- padding line 256 -->
-<!-- padding line 257 -->
-<!-- padding line 258 -->
-<!-- padding line 259 -->
-<!-- padding line 260 -->
-<!-- padding line 261 -->
-<!-- padding line 262 -->
-<!-- padding line 263 -->
-<!-- padding line 264 -->
-<!-- padding line 265 -->
-<!-- padding line 266 -->
-<!-- padding line 267 -->
-<!-- padding line 268 -->
-<!-- padding line 269 -->
-<!-- padding line 270 -->
-<!-- padding line 271 -->
-<!-- padding line 272 -->
-<!-- padding line 273 -->
-<!-- padding line 274 -->
-<!-- padding line 275 -->
-<!-- padding line 276 -->
-<!-- padding line 277 -->
-<!-- padding line 278 -->
-<!-- padding line 279 -->
-<!-- padding line 280 -->
-<!-- padding line 281 -->
-<!-- padding line 282 -->
-<!-- padding line 283 -->
-<!-- padding line 284 -->
-<!-- padding line 285 -->
-<!-- padding line 286 -->
-<!-- padding line 287 -->
-<!-- padding line 288 -->
-<!-- padding line 289 -->
-<!-- padding line 290 -->
-<!-- padding line 291 -->
-<!-- padding line 292 -->
-<!-- padding line 293 -->
-<!-- padding line 294 -->
-<!-- padding line 295 -->
-<!-- padding line 296 -->
-<!-- padding line 297 -->
-<!-- padding line 298 -->
-<!-- padding line 299 -->
-<!-- padding line 300 -->
-<!-- padding line 301 -->
-<!-- padding line 302 -->
-<!-- padding line 303 -->
-<!-- padding line 304 -->
-<!-- padding line 305 -->
-<!-- padding line 306 -->
-<!-- padding line 307 -->
-<!-- padding line 308 -->
-<!-- padding line 309 -->
-<!-- padding line 310 -->
-<!-- padding line 311 -->
-<!-- padding line 312 -->
-<!-- padding line 313 -->
-<!-- padding line 314 -->
-<!-- padding line 315 -->
-<!-- padding line 316 -->
-<!-- padding line 317 -->
-<!-- padding line 318 -->
-<!-- padding line 319 -->
-<!-- padding line 320 -->
-<!-- padding line 321 -->
-<!-- padding line 322 -->
-<!-- padding line 323 -->
-<!-- padding line 324 -->
-<!-- padding line 325 -->
-<!-- padding line 326 -->
-<!-- padding line 327 -->
-<!-- padding line 328 -->
-<!-- padding line 329 -->
-<!-- padding line 330 -->
-<!-- padding line 331 -->
-<!-- padding line 332 -->
-<!-- padding line 333 -->
-<!-- padding line 334 -->
-<!-- padding line 335 -->
-<!-- padding line 336 -->
-<!-- padding line 337 -->
-<!-- padding line 338 -->
-<!-- padding line 339 -->
-<!-- padding line 340 -->
-<!-- padding line 341 -->
-<!-- padding line 342 -->
-<!-- padding line 343 -->
-<!-- padding line 344 -->
-<!-- padding line 345 -->
-<!-- padding line 346 -->
-<!-- padding line 347 -->
-<!-- padding line 348 -->
-<!-- padding line 349 -->
-<!-- padding line 350 -->
-<!-- padding line 351 -->
-<!-- padding line 352 -->
-<!-- padding line 353 -->
-<!-- padding line 354 -->
-<!-- padding line 355 -->
-<!-- padding line 356 -->
-<!-- padding line 357 -->
-<!-- padding line 358 -->
-<!-- padding line 359 -->
-<!-- padding line 360 -->
-<!-- padding line 361 -->
-<!-- padding line 362 -->
-<!-- padding line 363 -->
-<!-- padding line 364 -->
-<!-- padding line 365 -->
-<!-- padding line 366 -->
-<!-- padding line 367 -->
-<!-- padding line 368 -->
-<!-- padding line 369 -->
-<!-- padding line 370 -->
-<!-- padding line 371 -->
-<!-- padding line 372 -->
-<!-- padding line 373 -->
-<!-- padding line 374 -->
-<!-- padding line 375 -->
-<!-- padding line 376 -->
-<!-- padding line 377 -->
-<!-- padding line 378 -->
-<!-- padding line 379 -->
-<!-- padding line 380 -->
-<!-- padding line 381 -->
-<!-- padding line 382 -->
-<!-- padding line 383 -->
-<!-- padding line 384 -->
-<!-- padding line 385 -->
-<!-- padding line 386 -->
-<!-- padding line 387 -->
-<!-- padding line 388 -->
-<!-- padding line 389 -->
-<!-- padding line 390 -->
-<!-- padding line 391 -->
-<!-- padding line 392 -->
-<!-- padding line 393 -->
-<!-- padding line 394 -->
-<!-- padding line 395 -->
-<!-- padding line 396 -->
-<!-- padding line 397 -->
-<!-- padding line 398 -->
-<!-- padding line 399 -->
-<!-- padding line 400 -->
-<!-- padding line 401 -->
-<!-- padding line 402 -->
-<!-- padding line 403 -->
-<!-- padding line 404 -->
-<!-- padding line 405 -->
-<!-- padding line 406 -->
-<!-- padding line 407 -->
-<!-- padding line 408 -->
-<!-- padding line 409 -->
-<!-- padding line 410 -->
-<!-- padding line 411 -->
-<!-- padding line 412 -->
-<!-- padding line 413 -->
-<!-- padding line 414 -->
-<!-- padding line 415 -->
-<!-- padding line 416 -->
-<!-- padding line 417 -->
-<!-- padding line 418 -->
-<!-- padding line 419 -->
-<!-- padding line 420 -->
-<!-- padding line 421 -->
-<!-- padding line 422 -->
-<!-- padding line 423 -->
-<!-- padding line 424 -->
-<!-- padding line 425 -->
-<!-- padding line 426 -->
-<!-- padding line 427 -->
-<!-- padding line 428 -->
-<!-- padding line 429 -->
-<!-- padding line 430 -->
-<!-- padding line 431 -->
-<!-- padding line 432 -->
-<!-- padding line 433 -->
-<!-- padding line 434 -->
-<!-- padding line 435 -->
-<!-- padding line 436 -->
-<!-- padding line 437 -->
-<!-- padding line 438 -->
-<!-- padding line 439 -->
-<!-- padding line 440 -->
-<!-- padding line 441 -->
-<!-- padding line 442 -->
-<!-- padding line 443 -->
-<!-- padding line 444 -->
-<!-- padding line 445 -->
-<!-- padding line 446 -->
-<!-- padding line 447 -->
-<!-- padding line 448 -->
-<!-- padding line 449 -->
-<!-- padding line 450 -->
-<!-- padding line 451 -->
-<!-- padding line 452 -->
-<!-- padding line 453 -->
-<!-- padding line 454 -->
-<!-- padding line 455 -->
-<!-- padding line 456 -->
-<!-- padding line 457 -->
-<!-- padding line 458 -->
-<!-- padding line 459 -->
-<!-- padding line 460 -->
-<!-- padding line 461 -->
-<!-- padding line 462 -->
-<!-- padding line 463 -->
-<!-- padding line 464 -->
-<!-- padding line 465 -->
-<!-- padding line 466 -->
-<!-- padding line 467 -->
-<!-- padding line 468 -->
-<!-- padding line 469 -->
-<!-- padding line 470 -->
-<!-- padding line 471 -->
-<!-- padding line 472 -->
-<!-- padding line 473 -->
-<!-- padding line 474 -->
-<!-- padding line 475 -->
-<!-- padding line 476 -->
-<!-- padding line 477 -->
-<!-- padding line 478 -->
-<!-- padding line 479 -->
-<!-- padding line 480 -->
-<!-- padding line 481 -->
-<!-- padding line 482 -->
-<!-- padding line 483 -->
-<!-- padding line 484 -->
-<!-- padding line 485 -->
-<!-- padding line 486 -->
-<!-- padding line 487 -->
-<!-- padding line 488 -->
-<!-- padding line 489 -->
-<!-- padding line 490 -->
-<!-- padding line 491 -->
-<!-- padding line 492 -->
-<!-- padding line 493 -->
-<!-- padding line 494 -->
-<!-- padding line 495 -->
-<!-- padding line 496 -->
-<!-- padding line 497 -->
-<!-- padding line 498 -->
-<!-- padding line 499 -->
-<!-- padding line 500 -->
-<!-- padding line 501 -->
-<!-- padding line 502 -->
-<!-- padding line 503 -->
-<!-- padding line 504 -->
-<!-- padding line 505 -->
-<!-- padding line 506 -->
-<!-- padding line 507 -->
-<!-- padding line 508 -->
-<!-- padding line 509 -->
-<!-- padding line 510 -->
-<!-- padding line 511 -->
-<!-- padding line 512 -->
-<!-- padding line 513 -->
-<!-- padding line 514 -->
-<!-- padding line 515 -->
-<!-- padding line 516 -->
-<!-- padding line 517 -->
-<!-- padding line 518 -->
-<!-- padding line 519 -->
-<!-- padding line 520 -->
-<!-- padding line 521 -->
-<!-- padding line 522 -->
-<!-- padding line 523 -->
-<!-- padding line 524 -->
-<!-- padding line 525 -->
-<!-- padding line 526 -->
-<!-- padding line 527 -->
-<!-- padding line 528 -->
-<!-- padding line 529 -->
-<!-- padding line 530 -->
-<!-- padding line 531 -->
-<!-- padding line 532 -->
-<!-- padding line 533 -->
-<!-- padding line 534 -->
-<!-- padding line 535 -->
-<!-- padding line 536 -->
-<!-- padding line 537 -->
-<!-- padding line 538 -->
-<!-- padding line 539 -->
-<!-- padding line 540 -->
-<!-- padding line 541 -->
-<!-- padding line 542 -->
-<!-- padding line 543 -->
-<!-- padding line 544 -->
-<!-- padding line 545 -->
-<!-- padding line 546 -->
-<!-- padding line 547 -->
-<!-- padding line 548 -->
-<!-- padding line 549 -->
-<!-- padding line 550 -->
-<!-- padding line 551 -->
-<!-- padding line 552 -->
-<!-- padding line 553 -->
-<!-- padding line 554 -->
-<!-- padding line 555 -->
-<!-- padding line 556 -->
-<!-- padding line 557 -->
-<!-- padding line 558 -->
-<!-- padding line 559 -->
-<!-- padding line 560 -->
-<!-- padding line 561 -->
-<!-- padding line 562 -->
-<!-- padding line 563 -->
-<!-- padding line 564 -->
-<!-- padding line 565 -->
-<!-- padding line 566 -->
-<!-- padding line 567 -->
-<!-- padding line 568 -->
-<!-- padding line 569 -->
-<!-- padding line 570 -->
-<!-- padding line 571 -->
-<!-- padding line 572 -->
-<!-- padding line 573 -->
-<!-- padding line 574 -->
-<!-- padding line 575 -->
-<!-- padding line 576 -->
-<!-- padding line 577 -->
-<!-- padding line 578 -->
-<!-- padding line 579 -->
-<!-- padding line 580 -->
-<!-- padding line 581 -->
-<!-- padding line 582 -->
-<!-- padding line 583 -->
-<!-- padding line 584 -->
-<!-- padding line 585 -->
-<!-- padding line 586 -->
-<!-- padding line 587 -->
-<!-- padding line 588 -->
-<!-- padding line 589 -->
-<!-- padding line 590 -->
-<!-- padding line 591 -->
-<!-- padding line 592 -->
-<!-- padding line 593 -->
-<!-- padding line 594 -->
-<!-- padding line 595 -->
-<!-- padding line 596 -->
-<!-- padding line 597 -->
-<!-- padding line 598 -->
-<!-- padding line 599 -->
-<!-- padding line 600 -->
-<!-- padding line 601 -->
-<!-- padding line 602 -->
-<!-- padding line 603 -->
-<!-- padding line 604 -->
-<!-- padding line 605 -->
-<!-- padding line 606 -->
-<!-- padding line 607 -->
-<!-- padding line 608 -->
-<!-- padding line 609 -->
-<!-- padding line 610 -->
-<!-- padding line 611 -->
-<!-- padding line 612 -->
-<!-- padding line 613 -->
-<!-- padding line 614 -->
-<!-- padding line 615 -->
-<!-- padding line 616 -->
-<!-- padding line 617 -->
-<!-- padding line 618 -->
-<!-- padding line 619 -->
-<!-- padding line 620 -->
-<!-- padding line 621 -->
-<!-- padding line 622 -->
-<!-- padding line 623 -->
-<!-- padding line 624 -->
-<!-- padding line 625 -->
-<!-- padding line 626 -->
-<!-- padding line 627 -->
-<!-- padding line 628 -->
-<!-- padding line 629 -->
-<!-- padding line 630 -->
-<!-- padding line 631 -->
-<!-- padding line 632 -->
-<!-- padding line 633 -->
-<!-- padding line 634 -->
-<!-- padding line 635 -->
-<!-- padding line 636 -->
-<!-- padding line 637 -->
-<!-- padding line 638 -->
-<!-- padding line 639 -->
-<!-- padding line 640 -->
-<!-- padding line 641 -->
-<!-- padding line 642 -->
-<!-- padding line 643 -->
-<!-- padding line 644 -->
-<!-- padding line 645 -->
-<!-- padding line 646 -->
-<!-- padding line 647 -->
-<!-- padding line 648 -->
-<!-- padding line 649 -->
-<!-- padding line 650 -->
-<!-- padding line 651 -->
-<!-- padding line 652 -->
-<!-- padding line 653 -->
-<!-- padding line 654 -->
-<!-- padding line 655 -->
-<!-- padding line 656 -->
-<!-- padding line 657 -->
-<!-- padding line 658 -->
-<!-- padding line 659 -->
-<!-- padding line 660 -->
-<!-- padding line 661 -->
-<!-- padding line 662 -->
-<!-- padding line 663 -->
-<!-- padding line 664 -->
-<!-- padding line 665 -->
-<!-- padding line 666 -->
-<!-- padding line 667 -->
-<!-- padding line 668 -->
-<!-- padding line 669 -->
-<!-- padding line 670 -->
-<!-- padding line 671 -->
-<!-- padding line 672 -->
-<!-- padding line 673 -->
-<!-- padding line 674 -->
-<!-- padding line 675 -->
-<!-- padding line 676 -->
-<!-- padding line 677 -->
-<!-- padding line 678 -->
-<!-- padding line 679 -->
-<!-- padding line 680 -->
-<!-- padding line 681 -->
-<!-- padding line 682 -->
-<!-- padding line 683 -->
-<!-- padding line 684 -->
-<!-- padding line 685 -->
-<!-- padding line 686 -->
-<!-- padding line 687 -->
-<!-- padding line 688 -->
-<!-- padding line 689 -->
-<!-- padding line 690 -->
-<!-- padding line 691 -->
-<!-- padding line 692 -->
-<!-- padding line 693 -->
-<!-- padding line 694 -->
-<!-- padding line 695 -->
-<!-- padding line 696 -->
-<!-- padding line 697 -->
-<!-- padding line 698 -->
-<!-- padding line 699 -->
-<!-- padding line 700 -->
-<!-- padding line 701 -->
-<!-- padding line 702 -->
-<!-- padding line 703 -->
-<!-- padding line 704 -->
-<!-- padding line 705 -->
-<!-- padding line 706 -->
-<!-- padding line 707 -->
-<!-- padding line 708 -->
-<!-- padding line 709 -->
-<!-- padding line 710 -->
-<!-- padding line 711 -->
-<!-- padding line 712 -->
-<!-- padding line 713 -->
-<!-- padding line 714 -->
-<!-- padding line 715 -->
-<!-- padding line 716 -->
-<!-- padding line 717 -->
-<!-- padding line 718 -->
-<!-- padding line 719 -->
-<!-- padding line 720 -->
-<!-- padding line 721 -->
-<!-- padding line 722 -->
-<!-- padding line 723 -->
-<!-- padding line 724 -->
-<!-- padding line 725 -->
-<!-- padding line 726 -->
-<!-- padding line 727 -->
-<!-- padding line 728 -->
-<!-- padding line 729 -->
-<!-- padding line 730 -->
-<!-- padding line 731 -->
-<!-- padding line 732 -->
-<!-- padding line 733 -->
-<!-- padding line 734 -->
-<!-- padding line 735 -->
-<!-- padding line 736 -->
-<!-- padding line 737 -->
-<!-- padding line 738 -->
-<!-- padding line 739 -->
-<!-- padding line 740 -->
-<!-- padding line 741 -->
-<!-- padding line 742 -->
-<!-- padding line 743 -->
-<!-- padding line 744 -->
-<!-- padding line 745 -->
-<!-- padding line 746 -->
-<!-- padding line 747 -->
-<!-- padding line 748 -->
-<!-- padding line 749 -->
-<!-- padding line 750 -->
-<!-- padding line 751 -->
-<!-- padding line 752 -->
-<!-- padding line 753 -->
-<!-- padding line 754 -->
-<!-- padding line 755 -->
-<!-- padding line 756 -->
-<!-- padding line 757 -->
-<!-- padding line 758 -->
-<!-- padding line 759 -->
-<!-- padding line 760 -->
-<!-- padding line 761 -->
-<!-- padding line 762 -->
-<!-- padding line 763 -->
-<!-- padding line 764 -->
-<!-- padding line 765 -->
-<!-- padding line 766 -->
-<!-- padding line 767 -->
-<!-- padding line 768 -->
-<!-- padding line 769 -->
-<!-- padding line 770 -->
-<!-- padding line 771 -->
-<!-- padding line 772 -->
-<!-- padding line 773 -->
-<!-- padding line 774 -->
-<!-- padding line 775 -->
-<!-- padding line 776 -->
-<!-- padding line 777 -->
-<!-- padding line 778 -->
-<!-- padding line 779 -->
-<!-- padding line 780 -->
-<!-- padding line 781 -->
-<!-- padding line 782 -->
-<!-- padding line 783 -->
-<!-- padding line 784 -->
-<!-- padding line 785 -->
-<!-- padding line 786 -->
-<!-- padding line 787 -->
-<!-- padding line 788 -->
-<!-- padding line 789 -->
-<!-- padding line 790 -->
-<!-- padding line 791 -->
-<!-- padding line 792 -->
-<!-- padding line 793 -->
-<!-- padding line 794 -->
-<!-- padding line 795 -->
-<!-- padding line 796 -->
-<!-- padding line 797 -->
-<!-- padding line 798 -->
-<!-- padding line 799 -->
-<!-- padding line 800 -->
-<!-- padding line 801 -->
-<!-- padding line 802 -->
-<!-- padding line 803 -->
-<!-- padding line 804 -->
-<!-- padding line 805 -->
-<!-- padding line 806 -->
-<!-- padding line 807 -->
-<!-- padding line 808 -->
-<!-- padding line 809 -->
-<!-- padding line 810 -->
-<!-- padding line 811 -->
-<!-- padding line 812 -->
-<!-- padding line 813 -->
-<!-- padding line 814 -->
-<!-- padding line 815 -->
-<!-- padding line 816 -->
-<!-- padding line 817 -->
-<!-- padding line 818 -->
-<!-- padding line 819 -->
-<!-- padding line 820 -->
-<!-- padding line 821 -->
-<!-- padding line 822 -->
-<!-- padding line 823 -->
-<!-- padding line 824 -->
-<!-- padding line 825 -->
-<!-- padding line 826 -->
-<!-- padding line 827 -->
-<!-- padding line 828 -->
-<!-- padding line 829 -->
-<!-- padding line 830 -->
-<!-- padding line 831 -->
-<!-- padding line 832 -->
-<!-- padding line 833 -->
-<!-- padding line 834 -->
-<!-- padding line 835 -->
-<!-- padding line 836 -->
-<!-- padding line 837 -->
-<!-- padding line 838 -->
-<!-- padding line 839 -->
-<!-- padding line 840 -->
-<!-- padding line 841 -->
-<!-- padding line 842 -->
-<!-- padding line 843 -->
-<!-- padding line 844 -->
-<!-- padding line 845 -->
-<!-- padding line 846 -->
-<!-- padding line 847 -->
-<!-- padding line 848 -->
-<!-- padding line 849 -->
-<!-- padding line 850 -->
-<!-- padding line 851 -->
-<!-- padding line 852 -->
-<!-- padding line 853 -->
-<!-- padding line 854 -->
-<!-- padding line 855 -->
-<!-- padding line 856 -->
-<!-- padding line 857 -->
-<!-- padding line 858 -->
-<!-- padding line 859 -->
-<!-- padding line 860 -->
-<!-- padding line 861 -->
-<!-- padding line 862 -->
-<!-- padding line 863 -->
-<!-- padding line 864 -->
-<!-- padding line 865 -->
-<!-- padding line 866 -->
-<!-- padding line 867 -->
-<!-- padding line 868 -->
-<!-- padding line 869 -->
-<!-- padding line 870 -->
-<!-- padding line 871 -->
-<!-- padding line 872 -->
-<!-- padding line 873 -->
-<!-- padding line 874 -->
-<!-- padding line 875 -->
-<!-- padding line 876 -->
-<!-- padding line 877 -->
-<!-- padding line 878 -->
-<!-- padding line 879 -->
-<!-- padding line 880 -->
-<!-- padding line 881 -->
-<!-- padding line 882 -->
-<!-- padding line 883 -->
-<!-- padding line 884 -->
-<!-- padding line 885 -->
-<!-- padding line 886 -->
-<!-- padding line 887 -->
-<!-- padding line 888 -->
-<!-- padding line 889 -->
-<!-- padding line 890 -->
-<!-- padding line 891 -->
-<!-- padding line 892 -->
-<!-- padding line 893 -->
-<!-- padding line 894 -->
-<!-- padding line 895 -->
-<!-- padding line 896 -->
-<!-- padding line 897 -->
-<!-- padding line 898 -->
-<!-- padding line 899 -->
-<!-- padding line 900 -->
-<!-- padding line 901 -->
-<!-- padding line 902 -->
-<!-- padding line 903 -->
-<!-- padding line 904 -->
-<!-- padding line 905 -->
-<!-- padding line 906 -->
-<!-- padding line 907 -->
-<!-- padding line 908 -->
-<!-- padding line 909 -->
-<!-- padding line 910 -->
-<!-- padding line 911 -->
-<!-- padding line 912 -->
-<!-- padding line 913 -->
-<!-- padding line 914 -->
-<!-- padding line 915 -->
-<!-- padding line 916 -->
-<!-- padding line 917 -->
-<!-- padding line 918 -->
-<!-- padding line 919 -->
-<!-- padding line 920 -->
-<!-- padding line 921 -->
-<!-- padding line 922 -->
-<!-- padding line 923 -->
-<!-- padding line 924 -->
-<!-- padding line 925 -->
-<!-- padding line 926 -->
-<!-- padding line 927 -->
-<!-- padding line 928 -->
-<!-- padding line 929 -->
-<!-- padding line 930 -->
-<!-- padding line 931 -->
-<!-- padding line 932 -->
-<!-- padding line 933 -->
-<!-- padding line 934 -->
-<!-- padding line 935 -->
-<!-- padding line 936 -->
-<!-- padding line 937 -->
-<!-- padding line 938 -->
-<!-- padding line 939 -->
-<!-- padding line 940 -->
-<!-- padding line 941 -->
-<!-- padding line 942 -->
-<!-- padding line 943 -->
-<!-- padding line 944 -->
-<!-- padding line 945 -->
-<!-- padding line 946 -->
-<!-- padding line 947 -->
-<!-- padding line 948 -->
-<!-- padding line 949 -->
-<!-- padding line 950 -->
-<!-- padding line 951 -->
-<!-- padding line 952 -->
-<!-- padding line 953 -->
-<!-- padding line 954 -->
-<!-- padding line 955 -->
-<!-- padding line 956 -->
-<!-- padding line 957 -->
-<!-- padding line 958 -->
-<!-- padding line 959 -->
-<!-- padding line 960 -->
-<!-- padding line 961 -->
-<!-- padding line 962 -->
-<!-- padding line 963 -->
-<!-- padding line 964 -->
-<!-- padding line 965 -->
-<!-- padding line 966 -->
-<!-- padding line 967 -->
-<!-- padding line 968 -->
-<!-- padding line 969 -->
-<!-- padding line 970 -->
-<!-- padding line 971 -->
-<!-- padding line 972 -->
-<!-- padding line 973 -->
-<!-- padding line 974 -->
-<!-- padding line 975 -->
-<!-- padding line 976 -->
-<!-- padding line 977 -->
-<!-- padding line 978 -->
-<!-- padding line 979 -->
-<!-- padding line 980 -->
-<!-- padding line 981 -->
-<!-- padding line 982 -->
-<!-- padding line 983 -->
-<!-- padding line 984 -->
-<!-- padding line 985 -->
-<!-- padding line 986 -->
-<!-- padding line 987 -->
-<!-- padding line 988 -->
-<!-- padding line 989 -->
-<!-- padding line 990 -->
-<!-- padding line 991 -->
-<!-- padding line 992 -->
-<!-- padding line 993 -->
-<!-- padding line 994 -->
-<!-- padding line 995 -->
-<!-- padding line 996 -->
-<!-- padding line 997 -->
-<!-- padding line 998 -->
-<!-- padding line 999 -->
-<!-- padding line 1000 -->
-<!-- padding line 1001 -->
-<!-- padding line 1002 -->
-<!-- padding line 1003 -->
-<!-- padding line 1004 -->
-<!-- padding line 1005 -->
-<!-- padding line 1006 -->
-<!-- padding line 1007 -->
-<!-- padding line 1008 -->
-<!-- padding line 1009 -->
-<!-- padding line 1010 -->
-<!-- padding line 1011 -->
-<!-- padding line 1012 -->
-<!-- padding line 1013 -->
-<!-- padding line 1014 -->
-<!-- padding line 1015 -->
-<!-- padding line 1016 -->
-<!-- padding line 1017 -->
-<!-- padding line 1018 -->
-<!-- padding line 1019 -->
-<!-- padding line 1020 -->
-<!-- padding line 1021 -->
-<!-- padding line 1022 -->
-<!-- padding line 1023 -->
-<!-- padding line 1024 -->
-<!-- padding line 1025 -->
-<!-- padding line 1026 -->
-<!-- padding line 1027 -->
-<!-- padding line 1028 -->
-<!-- padding line 1029 -->
-<!-- padding line 1030 -->
-<!-- padding line 1031 -->
-<!-- padding line 1032 -->
-<!-- padding line 1033 -->
-<!-- padding line 1034 -->
-<!-- padding line 1035 -->
-<!-- padding line 1036 -->
-<!-- padding line 1037 -->
-<!-- padding line 1038 -->
-<!-- padding line 1039 -->
-<!-- padding line 1040 -->
-<!-- padding line 1041 -->
-<!-- padding line 1042 -->
-<!-- padding line 1043 -->
-<!-- padding line 1044 -->
-<!-- padding line 1045 -->
-<!-- padding line 1046 -->
-<!-- padding line 1047 -->
-<!-- padding line 1048 -->
-<!-- padding line 1049 -->
-<!-- padding line 1050 -->
-<!-- padding line 1051 -->
-<!-- padding line 1052 -->
-<!-- padding line 1053 -->
-<!-- padding line 1054 -->
-<!-- padding line 1055 -->
-<!-- padding line 1056 -->
-<!-- padding line 1057 -->
-<!-- padding line 1058 -->
-<!-- padding line 1059 -->
-<!-- padding line 1060 -->
-<!-- padding line 1061 -->
-<!-- padding line 1062 -->
-<!-- padding line 1063 -->
-<!-- padding line 1064 -->
-<!-- padding line 1065 -->
-<!-- padding line 1066 -->
-<!-- padding line 1067 -->
-<!-- padding line 1068 -->
-<!-- padding line 1069 -->
-<!-- padding line 1070 -->
-<!-- padding line 1071 -->
-<!-- padding line 1072 -->
-<!-- padding line 1073 -->
-<!-- padding line 1074 -->
-<!-- padding line 1075 -->
-<!-- padding line 1076 -->
-<!-- padding line 1077 -->
-<!-- padding line 1078 -->
-<!-- padding line 1079 -->
-<!-- padding line 1080 -->
-<!-- padding line 1081 -->
-<!-- padding line 1082 -->
-<!-- padding line 1083 -->
-<!-- padding line 1084 -->
-<!-- padding line 1085 -->
-<!-- padding line 1086 -->
-<!-- padding line 1087 -->
-<!-- padding line 1088 -->
-<!-- padding line 1089 -->
-<!-- padding line 1090 -->
-<!-- padding line 1091 -->
-<!-- padding line 1092 -->
-<!-- padding line 1093 -->
-<!-- padding line 1094 -->
-<!-- padding line 1095 -->
-<!-- padding line 1096 -->
-<!-- padding line 1097 -->
-<!-- padding line 1098 -->
-<!-- padding line 1099 -->
-<!-- padding line 1100 -->
-<!-- padding line 1101 -->
-<!-- padding line 1102 -->
-<!-- padding line 1103 -->
-<!-- padding line 1104 -->
-<!-- padding line 1105 -->
-<!-- padding line 1106 -->
-<!-- padding line 1107 -->
-<!-- padding line 1108 -->
-<!-- padding line 1109 -->
-<!-- padding line 1110 -->
-<!-- padding line 1111 -->
+Rules:
+
+- Re-scan always runs on the UPDATED response text, never the original.
+- The same phrase may block at most twice per turn; the second block must
+  name what evidence is still missing, explicitly.
+- Three blocks on one claim = escalation: the claim is downgraded to
+  UNTESTED and the task re-queued with the missing-verification note.
+- The lifecycle never edits the agent's text; it only pauses, requests,
+  and re-scans.
+
+## SECTION 8 - SELF-TEST (the gate tests its own list)
+
+The phrase list and detector have a self-test that must pass after ANY edit
+to this skill. Run it before relying on a modified list:
+
+```python
+def test_self():
+    # 1. Count integrity: 25 + 20 + 15 = 60
+    assert len(CAT_A) == 25 and len(CAT_B) == 20 and len(CAT_C) == 15
+
+    # 2. No phrase appears in two categories (dedup)
+    all_phrases = CAT_A + CAT_B + CAT_C
+    assert len(set(p.lower() for p in all_phrases)) == 60
+
+    # 3. Canonical blocks
+    assert check_overclaim("The deployment is complete.")["result"] == "BLOCK"
+    assert check_overclaim("This should work now.")["result"] == "BLOCK"
+    assert check_overclaim(
+        "I cannot test but the logic is verified.")["result"] == "BLOCK"
+
+    # 4. Canonical passes
+    assert check_overclaim("Does this look correct?")["result"] == "PASS"
+    assert check_overclaim("The output above shows exit 0.")["result"] == "PASS"
+
+    # 5. Context-window rule: phrase with NO context word nearby = PASS
+    assert check_overclaim(
+        "The recipe says the dough is done resting overnight."
+    )["result"] == "PASS"
+
+    # 6. Question-form exclusion
+    assert check_overclaim("Is it done?")["result"] == "PASS"
+```
+
+Failure of any assertion blocks any done-claim in the session that modified
+the list until fixed. The self-test exists because a phrase list edited
+without verification has, in practice, silently emptied itself.
+
+## SECTION 9 - EXTENDING THE LIST (process, not vibes)
+
+New phrases enter by incident, not by imagination:
+
+1. A false-done occurs (or nearly occurs) in a real session.
+2. The exact wording is quoted and dated in the incident note.
+3. The phrase is added to the correct category with a one-line "why it
+   fails" comment.
+4. The self-test in Section 8 is re-run and pasted.
+5. The base anti-overclaim skill's phrase table is NOT edited - this skill
+   is the single live list (see Alias Map note at top).
+
+Retirement is allowed only with a recorded false-positive incident showing
+the phrase blocks legitimate usage with no available alternative phrasing.
+
+## SECTION 10 - FAQ
+
+**Q: Does this block honest uncertainty like "should be done by now"?**
+Category B targets certainty claims, not schedules. "Should be done by
+Friday" has no done-claim context word adjacent to an assertion of
+completion - no block. "This should work" asserts behavior without
+measurement - block. The context window is what disambiguates.
+
+**Q: What if the evidence contradicts the claim?**
+Out of scope for Gate 2 (it is a prose scanner). The contradiction is a
+defect for proven-working's contradiction-handling protocol: stop, re-run
+both checks, then escalate.
+
+**Q: What if the agent games the detector with synonyms?**
+Then Gate 1 (ground-truth harness) still requires pasted evidence for the
+done-claim, and Gate 4 requires the evidence block. The phrase list is a
+tripwire, not the foundation - the evidence requirement is.
+
+**Q: Are code blocks scanned?**
+Yes - the agent may be describing its own output in them, and "done" inside
+a fenced block next to a context word has historically been a real overclaim
+(the agent narrating an unrun command's expected output).
+
+**Q: Where does this sit relative to honestscore?**
+Upstream. honestscore judges quality on a rubric; this gate guarantees the
+response does not claim completion without evidence before quality is even
+discussed. Skipping the gate to reach the score is itself an overclaim.
+
+## SECTION 11 - TIE-BREAK DECISION TABLE
+
+| Situation | Verdict |
+|---|---|
+| Phrase + context word + no evidence anywhere in response | BLOCK |
+| Phrase + context word + real pasted tool output in response | PASS-WITH-NOTE |
+| Phrase + context word, sentence is a question | no block (question rule) |
+| Phrase + "in theory" prefix, no done-context word in window | no block (context rule) |
+| Phrase in a fenced code block adjacent to a completion claim | block (narrated output) |
+| Phrase quoting the USER's message approvingly | block |
+| Phrase in an unrelated sense (recipe, game, doc quote) | context-window rule decides |
+| Evidence pasted AFTER a block, phrase still present | PASS-WITH-NOTE, gate line records the resolution |
+| Evidence contradicted by the phrase ("tested" with no run shown) | BLOCK stays; evidence must be the actual output |
+
+The table is exhaustive by design: new situations join the table via
+Section 9's incident process instead of being improvised per turn.
+
+## SECTION 11 - FALSE-POSITIVE LEDGER
+
+Wrongly-blocked responses are recorded with their resolution. The ledger
+keeps the detector precise in both directions (misses AND false alarms):
+
+| Date | Phrase | Context | Wrongly blocked? | Resolution |
+|---|---|---|---|---|
+| 2026-11-08 | complete | "the emoji set is complete" (list of 10 pasted) | yes | precision rule: pasted-evidence presence converts a block to a note |
+| (none since) | | | | |
+
+Rules:
+
+- A false positive is fixed by ADDING a precision rule (evidence presence,
+  question form, context window) - never by deleting the phrase.
+- Every precision rule gets a self-test case in Section 8 so it cannot
+  silently regress.
+- Precision rules stack in a fixed order: question-form first, then
+  hypothetical prefix, then evidence-presence tie-break, then block.
+
+## SECTION 12 - ESCALATION MATRIX
+
+| Event | Action |
+|---|---|
+| 1st BLOCK on a claim | pause; request evidence (a/b/c/d) |
+| evidence provided, re-scan clean | PASS (or PASS-WITH-NOTE if a flagged phrase remains beside the evidence) |
+| re-scan still BLOCKs with evidence present | show which phrase fired; agent may rephrase or attach evidence differently |
+| 2nd BLOCK on the same claim | pause; explicitly name what evidence is still missing |
+| 3rd BLOCK on the same claim | claim downgraded to UNTESTED; task re-queued with the missing verification named |
+| detector unavailable/misfires | gate line reads anti-overclaim-upgrade=skipped:detector-error; the claim still cannot pass without Gate 1 evidence |
+
+## SECTION 13 - FULL WORKED TRANSCRIPT (block, then resolution)
+
+**Turn 1 - agent emits a bare claim:**
+
+```
+Agent: Migrated all three services to the new config format and
+everything is working now.
+```
+
+Gate 2 scan: `working` (Cat-A) present; the sentence asserts a completed
+ACTION ("migrated"); context window contains "config"/"services"; not a
+question. Block:
+
+```
+ANTI-OVERCLAIM BLOCK DETECTED (Gate #2)
+
+Phrase   : "working" (Category A - Soft Done-Claim)
+Found in : "Migrated all three services to the new config format and
+everything is working now."
+
+Execution is PAUSED. Provide (a) command output, (b) file read-back,
+(c) test output with exit code, or (d) "untested - exact command: [...]"
+```
+
+**Turn 2 - agent attaches evidence:**
+
+```
+Agent: Config migration applied to all three services. Verification:
+  $ grep -c "format: v2" /etc/svc/{api,worker,scheduler}.yml
+  3
+  $ systemctl is-active api worker scheduler
+  active
+  active
+  active
+Exit 0. All three services on format v2 and running.
+```
+
+Gate 2 re-scan: `working` is gone, but `running` IS Cat-A (#24) and present.
+However, pasted verification output accompanies it. Tie-break: PASS-WITH-NOTE.
+
+```
+ANTI-OVERCLAIM: PASS-WITH-NOTE - phrase "running" (Cat-A) present but
+accompanied by pasted verification output (accepted by context).
+Forwarding to Gate 3: skill-paperclip-ledger-guard
+claim-gates: ... | anti-overclaim-upgrade=PASS(was-BLOCK:"working" Cat-A, resolved)
+```
+
+The honest wobble in this transcript: the re-scan caught a DIFFERENT Cat-A
+word than the first block. That is normal - the fix loop tightens the
+response; it does not negotiate with the detector.
+
+## SECTION 14 - WHAT PASS-WITH-NOTE MEANS DOWNSTREAM
+
+- Gate 3 (paperclip-ledger-guard) accepts a PASS-WITH-NOTE response but
+  records the flagged phrase in the bundle notes.
+- Gate 4 (base anti-overclaim) requires the evidence block regardless; the
+  pasted output satisfies it verbatim.
+- A response with a flagged phrase and NO pasted evidence never receives the
+  tie-break: it remains BLOCKED. The note exists only when evidence exists.
+- A PASS-WITH-NOTE with the same phrase flagged three times on one claim is
+  escalated per Section 12 - the tie-break is not a standing exemption.
+
+## SECTION 15 - PHRASE-LIST MAINTENANCE LEDGER
+
+Every change to the 60-phrase list is logged here, so drift is visible:
+
+| Date | Change | Reason | Self-test result |
+|---|---|---|---|
+| 2026-11-08 | initial 60 phrases (25/20/15) | v66 godmode build | not yet enforced |
+| (append-only; never delete a row) | | | |
+
+Rules:
+
+- The list grows only via the incident process (Section 9). "It feels like a
+  good phrase" is not an incident.
+- The count assertion in the self-test (25 + 20 + 15 = 60) must be updated in
+  the SAME edit as any list change - a mismatch blocks all done-claims until
+  corrected, by design.
+- Retired phrases move to a RETIRED list with the false-positive incident id;
+  they are not deleted.
+
+## SECTION 16 - RESPONSES THAT THIS GATE MUST NEVER PRODUCE
+
+The detector holds itself to the same standard it enforces:
+
+- It never says "all clear" - it says PASS with the scan scope stated.
+- It never summarizes the blocked phrase ("a completion word") - it quotes
+  the exact phrase and category, verbatim, so the agent can fix the sentence.
+- It never blocks a question, a hypothesis, or an evidence-bearing response
+  silently - every block names the exact rule that fired.
+- It does not edit the response. It pauses, routes, and re-scans.
+
+## SECTION 17 - CATEGORY D (RESERVED)
+
+A fourth category is reserved but intentionally empty: Category D would hold
+cross-gate overclaims (claims about the gate stack itself, e.g. "gates all
+fired" with no gate line emitted). It is added only when a real incident
+demonstrates a shape the current 60 phrases cannot catch. An empty category
+is honest; an invented phrase list is not.
+
+## APPENDIX - QUICK REFERENCE CARD
+
+```
++------------------------------------------------------------+
+|  Anti-Overclaim Upgrade - Quick Reference                   |
++------------------------------------------------------------+
+|  Gate position : #2 of 4                                    |
+|  Fires on      : done/fixed/shipped/deployed claims         |
+|  Skips on      : questions, hypotheticals, no-context hits  |
+|  Phrase list   : 60 total (25 Cat-A / 20 B / 15 C)          |
++------------------------------------------------------------+
+|  On BLOCK: paste (a) cmd output, (b) file read-back,        |
+|            (c) test output, or (d) "untested - cmd"         |
++------------------------------------------------------------+
+|  Gate line: anti-overclaim-upgrade=PASS                     |
+|          or anti-overclaim-upgrade=BLOCK:["phrase"]         |
++------------------------------------------------------------+
+|  Self-test required after ANY list change (Section 8)       |
++------------------------------------------------------------+
+```
