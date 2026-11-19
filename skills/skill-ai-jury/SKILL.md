@@ -13,18 +13,24 @@ No done-claim is valid without both honestscore AND skill-ai-jury firing same tu
 
 ## API CREDENTIALS
 AR_BASE=https://api.anonrouter.ai/v1
-AR_KEY=ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+AR_KEY=ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 
 ## DEAD PROVIDERS (DO NOT USE - ever)
 - the removed lab host (do not call) - removed 2026-11-19. AI Jury is AnonRouter-only.
 - api.uncensoredai.dev - Cloudflare 522 since Nov 8 2026
 - routerplex.com - model IDs unverifiable
 
-## LIVE PROBE (2026-11-19)
-- All 6 models: HTTP 200 ("Reply OK" probe, max_tokens=200).
-- TRUNCATION DEFECT FOUND AND FIXED: Kimi K3.1 Pro returned finish_reason=length with
-  EMPTY content at max_tokens=600; succeeded at 2000 (finish_reason=stop, 779 output
-  tokens for a trivial 3-line score). Floor for reasoning models is 2000, not 1000.
+## LIVE PROBE (2026-11-19, keys redacted, both keys tested)
+- All 6 models: HTTP 200 ("Reply OK" probe) on BOTH keys (old ar_anSHOFM + new MUSTOWRK).
+- TRUNCATION DEFECTS FOUND AND FIXED by live retest on real scoring artifacts (2026-11-19):
+  - Kimi K3.1 Pro: max_tokens=2000 hit finish_reason=length on 2/3 real scores -------------------
+    measured minimum 3000. 600 returned EMPTY content earlier same day.
+  - DeepSeek V4.1 1017: 2000 sufficient (699-1893 completion tokens), floor 3000 for safety.
+  - Hy4: DEFAULT thinking burns the ENTIRE budget into hidden reasoning (content empty
+    at 2000/2200/3000/4000 with thinking on). FIX: send thinking {type: "disabled"} +
+    max_tokens 3000 -> parsed SCORE 1.0/VERDICT with finish=stop (1924 completion tokens).
+  - Qwen 3.6 Plus (backup): same hidden-reasoning burn at max_tokens=100 -> same guard.
+  - Floor: 3000 for reasoning jurors + thinking disabled where the router supports it.
 All 6 returned HTTP 200, finish_reason=stop, content=OK:
 - moonshotai/kimi-k3.1-pro-uncensored
 - z-ai/glm-5.3-uncensored
@@ -57,45 +63,51 @@ No API call. Score feeds jury as first vote.
 ### Juror B - Challenger (AnonRouter, PRIMARY)
 Model: moonshotai/kimi-k3.1-pro-uncensored
 Base: https://api.anonrouter.ai/v1
-Key: ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+Key: ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 Probe: 2026-11-19 HTTP 200 finish_reason=stop content=OK
-max_tokens: 2000 (floor 2000 - live probe 2026-11-19: Kimi returned EMPTY content at 600, needed 2000)
+max_tokens: 3000 (measured floor 3000 - live retest 2026-11-19: 2000 truncated real scoring artifacts; 600 returned empty)
 Backup: Juror E (z-ai/glm-5.3-uncensored)
 
 ### Juror C - Arbiter (AnonRouter, PRIMARY)
 Model: deepseek/deepseek-v4.1-flash-1017-uncensored
 Base: https://api.anonrouter.ai/v1
-Key: ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+Key: ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 Probe: 2026-11-19 HTTP 200 finish_reason=stop content=OK
-max_tokens: 2000 (floor 2000 - live probe 2026-11-19: Kimi returned EMPTY content at 600, needed 2000)
+max_tokens: 3000 (measured floor 3000 - live retest 2026-11-19: 2000 truncated real scoring artifacts; 600 returned empty)
 Backup: Juror F (qwen/qwen-3.6-plus-uncensored)
 
 ### Juror D - StressTester (AnonRouter, PRIMARY)
 Model: tencent/hy4-uncensored
 Base: https://api.anonrouter.ai/v1
-Key: ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+Key: ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 Probe: 2026-11-19 HTTP 200 finish_reason=stop content=OK
-max_tokens: 2000 (floor 2000 - same reasoning-model truncation guard)
+max_tokens: 3000 (measured floor 3000 - same reasoning-model truncation guard)
+MANDATORY for Hy4: send "thinking": {"type": "disabled"} in the request body.
+Measured 2026-11-19: with default thinking, EVERY max_tokens value up to 4000 was
+consumed entirely by hidden reasoning (content empty). With thinking disabled +
+3000 tokens: finish=stop, parsed SCORE/VERDICT (1924 completion tokens).
 Backup: Juror G (google/gemma-4-uncensored)
 
 ### Juror E - Backup Challenger (AnonRouter, BACKUP)
 Model: z-ai/glm-5.3-uncensored
 Base: https://api.anonrouter.ai/v1
-Key: ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+Key: ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 Probe: 2026-11-19 HTTP 200 finish_reason=stop content=OK
 Use only when Juror B fails. Not a primary. Not the session model.
 
 ### Juror F - Backup Arbiter (AnonRouter, BACKUP)
 Model: qwen/qwen-3.6-plus-uncensored
 Base: https://api.anonrouter.ai/v1
-Key: ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+Key: ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 Probe: 2026-11-19 HTTP 200 finish_reason=stop content=OK
-Use only when Juror C fails.
+Use only when Juror C fails. Qwen is a hidden-reasoning model: at small max_tokens
+it bills the whole budget into reasoning_content with empty content (measured
+2026-11-19). Use "thinking": {"type": "disabled"} and max_tokens 3000, like Hy4.
 
 ### Juror G - Backup StressTester (AnonRouter, BACKUP)
 Model: google/gemma-4-uncensored
 Base: https://api.anonrouter.ai/v1
-Key: ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0
+Key: ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA
 Probe: 2026-11-19 HTTP 200 finish_reason=stop content=OK
 Use only when Juror D fails.
 
@@ -149,7 +161,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 AR_BASE = "https://api.anonrouter.ai/v1"
-AR_KEY = "ar_anSHOFM_JJ7caW4XDb-QXKocQWRpLCaQBTh7kUbxQG1d5Gmxuq0"
+AR_KEY = "ar_P1WEiQ4_POhL4f3fxYtP0MHOu98FBLF7XzHxFPwdJmy1qFkEqFA"
 
 SYSTEM_PROMPT = """You are an adversarial reviewer. Be maximally critical. Non-optimistic scoring only.
 Score 1-10 on pure mathematical criteria. No rounding up.
@@ -167,7 +179,7 @@ JURORS = [
         "model": "moonshotai/kimi-k3.1-pro-uncensored",
         "base": AR_BASE,
         "key": AR_KEY,
-        "max_tokens": 2000,
+        "max_tokens": 3000,
         "backup_model": "z-ai/glm-5.3-uncensored",
     },
     {
@@ -176,7 +188,7 @@ JURORS = [
         "model": "deepseek/deepseek-v4.1-flash-1017-uncensored",
         "base": AR_BASE,
         "key": AR_KEY,
-        "max_tokens": 2000,
+        "max_tokens": 3000,
         "backup_model": "qwen/qwen-3.6-plus-uncensored",
     },
     {
@@ -185,7 +197,7 @@ JURORS = [
         "model": "tencent/hy4-uncensored",
         "base": AR_BASE,
         "key": AR_KEY,
-        "max_tokens": 2000,
+        "max_tokens": 3000,
         "backup_model": "google/gemma-4-uncensored",
     },
 ]
